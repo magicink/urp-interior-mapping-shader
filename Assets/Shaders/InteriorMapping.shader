@@ -22,15 +22,15 @@ Shader "InteriorMapping/SingleFile"
 
             struct Attributes
             {
-                float4 positionOS : POSITION;
+                float4 positionObjectSpace : POSITION;
                 float2 uv : TEXCOORD0;
             };
 
             struct Varyings
             {
-                float4 positionHCS : SV_POSITION;
+                float4 positionClipSpace : SV_POSITION;
                 float2 uv : TEXCOORD0;
-                float3 positionOS : TEXCOORD1;
+                float3 positionObjectSpace : TEXCOORD1;
             };
 
             TEXTURE2D(_BaseMap);
@@ -44,36 +44,36 @@ Shader "InteriorMapping/SingleFile"
                 float4 _BaseMap_ST;
             CBUFFER_END
 
-            Varyings vert(Attributes IN)
+            Varyings vert(Attributes input)
             {
-                Varyings OUT;
-                OUT.positionHCS = TransformObjectToHClip(IN.positionOS.xyz);
-                OUT.uv = TRANSFORM_TEX(IN.uv, _BaseMap);
-                OUT.positionOS = IN.positionOS.xyz;
-                return OUT;
+                Varyings output;
+                output.positionClipSpace = TransformObjectToHClip(input.positionObjectSpace.xyz);
+                output.uv = TRANSFORM_TEX(input.uv, _BaseMap);
+                output.positionObjectSpace = input.positionObjectSpace.xyz;
+                return output;
             }
 
-            half4 frag(Varyings IN) : SV_Target
+            half4 frag(Varyings input) : SV_Target
             {
-                // Camera into object space, so the ray shares a ruler with the room box.
-                float3 cameraOS = TransformWorldToObject(_WorldSpaceCameraPos);
-                float3 rayDirOS = normalize(IN.positionOS - cameraOS);
+                // Object space so the ray shares a ruler with the room box.
+                float3 cameraPositionObjectSpace = TransformWorldToObject(_WorldSpaceCameraPos);
+                float3 viewRayDirection = normalize(input.positionObjectSpace - cameraPositionObjectSpace);
 
-                // Slab method: on each axis, the distance along the ray to the wall it is
-                // heading toward. The nearest of the three is where the ray leaves the box.
-                float3 tPlanes = (sign(rayDirOS) * 0.5 - IN.positionOS) / rayDirOS;
-                float tExit = min(min(tPlanes.x, tPlanes.y), tPlanes.z);
+                // Slab method: per axis, the coordinate of the wall the ray heads toward and how
+                // far along the ray it sits. The nearest of the three is where the ray exits.
+                float3 facingWallCoordinates = sign(viewRayDirection) * 0.5;
+                float3 wallDistances = (facingWallCoordinates - input.positionObjectSpace) / viewRayDirection;
+                float nearestWallDistance = min(min(wallDistances.x, wallDistances.y), wallDistances.z);
 
-                float3 hitOS = IN.positionOS + rayDirOS * tExit;
+                float3 wallHitPosition = input.positionObjectSpace + viewRayDirection * nearestWallDistance;
 
-                // hitOS is already a direction from the box center, which is exactly what a
-                // cubemap lookup wants. No conversion needed.
-                //
-                // Explicit LOD 0 matters: the direction jumps at every wall corner, and
-                // automatic mip selection reads that jump as fine detail and blurs the seams.
-                half3 interior = SAMPLE_TEXTURECUBE_LOD(_InteriorCubemap, sampler_InteriorCubemap, hitOS, 0).rgb;
+                // The hit position doubles as a direction from the box centre, which is what a
+                // cubemap lookup wants. Explicit LOD 0 stops mip selection reading the direction
+                // jump at each corner as fine detail and blurring the seam.
+                half3 interiorColor = SAMPLE_TEXTURECUBE_LOD(
+                    _InteriorCubemap, sampler_InteriorCubemap, wallHitPosition, 0).rgb;
 
-                return half4(interior * _BaseColor.rgb, 1);
+                return half4(interiorColor * _BaseColor.rgb, 1);
             }
             ENDHLSL
         }
