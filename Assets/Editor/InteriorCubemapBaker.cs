@@ -54,6 +54,10 @@ namespace InteriorMapping.EditorTools
                 };
                 cubemapRenderTarget.Create();
 
+                // The first face off a camera and renderers created this same call culls to an
+                // empty clear, so this pass is thrown away and the second one is kept.
+                probeCamera.RenderToCubemap(cubemapRenderTarget);
+
                 // Engine-driven so cubemap handedness and per-platform vertical flip stay correct.
                 if (!probeCamera.RenderToCubemap(cubemapRenderTarget))
                 {
