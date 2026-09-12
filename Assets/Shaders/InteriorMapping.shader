@@ -6,6 +6,12 @@ Shader "InteriorMapping/SingleFile"
         _InteriorCubemap("Interior Cubemap", Cube) = "" {}
         [MainColor] _BaseColor("Interior Tint", Color) = (1, 1, 1, 1)
 
+        [Header(Blinds)]
+        _BlindColor("Blind Color", Color) = (0.88, 0.86, 0.8, 1)
+        _BlindDepth("Blind Depth", Range(0, 0.5)) = 0.12
+        _BlindCoverage("Blind Coverage", Range(0, 1)) = 0.5
+        [IntRange] _SlatCount("Slat Count", Range(0, 40)) = 14
+
         [Header(Facade)]
         [MainTexture] _BaseMap("Facade Map", 2D) = "white" {}
         _FacadeColor("Facade Color", Color) = (0.48, 0.27, 0.22, 1)
@@ -79,6 +85,7 @@ Shader "InteriorMapping/SingleFile"
                 half4 _FacadeColor;
                 half4 _FrameColor;
                 half4 _GroundFloorColor;
+                half4 _BlindColor;
                 float4 _BaseMap_ST;
                 float4 _WindowsPerFace;
                 float4 _MuntinsPerPane;
@@ -93,6 +100,9 @@ Shader "InteriorMapping/SingleFile"
                 float _MullionWidth;
                 float _CheckRailHeight;
                 float _CheckRailWidth;
+                float _BlindDepth;
+                float _BlindCoverage;
+                float _SlatCount;
                 float _GlassRecessDepth;
                 float _GlassReflectivity;
                 float _SunGlintStrength;
@@ -150,10 +160,11 @@ Shader "InteriorMapping/SingleFile"
 
                 // Every room shares one cubemap, so mirror it per room or the block reads as
                 // wallpaper. Flipping position and ray together keeps the reflection consistent.
-                float2 roomNoise = frac(sin(float2(dot(roomIndex, float3(12.9898, 78.233, 37.719)),
-                                                   dot(roomIndex, float3(39.346, 11.135, 83.155))))
+                float3 roomNoise = frac(sin(float3(dot(roomIndex, float3(12.9898, 78.233, 37.719)),
+                                                   dot(roomIndex, float3(39.346, 11.135, 83.155)),
+                                                   dot(roomIndex, float3(73.156, 52.235, 9.1513))))
                                         * 43758.5453);
-                float2 mirrorSigns = step(0.5, roomNoise) * 2.0 - 1.0;
+                float2 mirrorSigns = step(0.5, roomNoise.xy) * 2.0 - 1.0;
                 float3 mirrorAxes = float3(mirrorSigns.x, 1.0, mirrorSigns.y);
 
                 // The facade is not mirrored, so its recess needs the ray as it really is.
@@ -183,8 +194,8 @@ Shader "InteriorMapping/SingleFile"
 
                 // The same swap as cellUv, leaving the ray as across-the-face, up, into-the-wall.
                 float3 rayInFaceSpace = lerp(facadeRayDirection.xyz, facadeRayDirection.zyx, isFacingX);
-                float2 glassCellUv = cellUv + rayInFaceSpace.xy *
-                                     (_GlassRecessDepth / max(abs(rayInFaceSpace.z), 1e-4));
+                float2 parallaxPerDepth = rayInFaceSpace.xy / max(abs(rayInFaceSpace.z), 1e-4);
+                float2 glassCellUv = cellUv + parallaxPerDepth * _GlassRecessDepth;
 
                 // The bottom rows are shopfronts, not flats. roomIndex.y is already the floor
                 // number, so the band is one compare that everything below reads off.
@@ -248,7 +259,22 @@ Shader "InteriorMapping/SingleFile"
                 float3 halfVector = normalize(viewDirectionWorld + _MainLightPosition.xyz);
                 half sunGlint = pow(saturate(dot(normalWorld, halfVector)), _SunGlintSharpness);
 
-                half3 glassColor = lerp(interiorColor * _BaseColor.rgb, skyColor, reflectionAmount);
+                // A blind hangs deeper than the glass, so it slides against the interior rather
+                // than with it. That difference in rate is the depth cue, not the blind itself.
+                float2 blindCellUv = cellUv + parallaxPerDepth * (_GlassRecessDepth + _BlindDepth);
+
+                // Coverage shifts the hash rather than scaling it, so the ends of the slider clamp
+                // rooms to fully open or fully shut instead of settling everything on an average.
+                float blindDrop = saturate(roomNoise.z + _BlindCoverage * 2.0 - 1.0);
+                float isBlind = step(1.0 - blindDrop, blindCellUv.y);
+
+                // Slats shade as a sawtooth: each one is shadowed at its lower edge by the one
+                // above. A count of zero flattens the whole blind into a roller shade.
+                float slatShade = lerp(0.72, 1.0, frac(blindCellUv.y * _SlatCount));
+                half3 behindGlass = lerp(interiorColor * _BaseColor.rgb,
+                                         _BlindColor.rgb * slatShade, isBlind);
+
+                half3 glassColor = lerp(behindGlass, skyColor, reflectionAmount);
                 glassColor += _MainLightColor.rgb * sunGlint * _SunGlintStrength * lambert;
 
                 float2 facadeUv = TRANSFORM_TEX(input.uv, _BaseMap);
