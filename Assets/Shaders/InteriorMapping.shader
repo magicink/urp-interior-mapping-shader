@@ -16,6 +16,12 @@ Shader "InteriorMapping/SingleFile"
         _FrameThickness("Frame Thickness", Range(0, 0.25)) = 0.06
         _RevealShading("Reveal Shading", Range(0, 1)) = 0.55
 
+        [Header(Ground Floor)]
+        [IntRange] _GroundFloorCount("Ground Floor Count", Range(0, 8)) = 1
+        _GroundFloorFrameWidth("Ground Floor Frame Width", Range(0, 0.49)) = 0.06
+        _GroundFloorArchHeight("Ground Floor Arch Height", Range(0, 1)) = 0
+        _GroundFloorColor("Ground Floor Color", Color) = (0.62, 0.6, 0.56, 1)
+
         [Header(Glazing Bars)]
         _MuntinsPerPane("Muntins Per Pane (X, Y)", Vector) = (2, 2, 0, 0)
         _MuntinWidth("Muntin Width", Range(0, 0.05)) = 0.008
@@ -72,6 +78,7 @@ Shader "InteriorMapping/SingleFile"
                 half4 _BaseColor;
                 half4 _FacadeColor;
                 half4 _FrameColor;
+                half4 _GroundFloorColor;
                 float4 _BaseMap_ST;
                 float4 _WindowsPerFace;
                 float4 _MuntinsPerPane;
@@ -79,6 +86,9 @@ Shader "InteriorMapping/SingleFile"
                 float _ArchHeight;
                 float _FrameThickness;
                 float _RevealShading;
+                float _GroundFloorCount;
+                float _GroundFloorFrameWidth;
+                float _GroundFloorArchHeight;
                 float _MuntinWidth;
                 float _MullionWidth;
                 float _CheckRailHeight;
@@ -92,11 +102,11 @@ Shader "InteriorMapping/SingleFile"
 
             // Distance past the edge of a window opening, negative inside. The max(.y, 0) collapses
             // the vertical term below the springing, leaving straight jambs under a circular head.
-            float DistancePastOpening(float2 fromCentre, float2 halfExtents)
+            float DistancePastOpening(float2 fromCentre, float2 halfExtents, float archHeight)
             {
                 // The radius grows as the arch flattens, which keeps the crown at the top of the
                 // opening and turns a low setting into a shallow segmental head.
-                float headRadius = halfExtents.x / max(_ArchHeight, 0.05);
+                float headRadius = halfExtents.x / max(archHeight, 0.05);
                 float springHeight = halfExtents.y - headRadius;
 
                 float boxDistance = max(abs(fromCentre.x) - halfExtents.x,
@@ -176,17 +186,24 @@ Shader "InteriorMapping/SingleFile"
                 float2 glassCellUv = cellUv + rayInFaceSpace.xy *
                                      (_GlassRecessDepth / max(abs(rayInFaceSpace.z), 1e-4));
 
+                // The bottom rows are shopfronts, not flats. roomIndex.y is already the floor
+                // number, so the band is one compare that everything below reads off.
+                float isGroundFloor = step(roomIndex.y, _GroundFloorCount - 1.0);
+                float frameWidth = lerp(_WindowFrameWidth, _GroundFloorFrameWidth, isGroundFloor);
+                float archHeight = lerp(_ArchHeight, _GroundFloorArchHeight, isGroundFloor);
+
                 // A circular head in cell space would be an ellipse on the wall, so square the cell
                 // up from the room counts before measuring anything.
                 float archAspect = roomsPerAxis.y / lerp(roomsPerAxis.x, roomsPerAxis.z, isFacingX);
-                float2 openingHalfExtents = (0.5 - _WindowFrameWidth) * float2(archAspect, 1.0);
+                float2 openingHalfExtents = (0.5 - frameWidth) * float2(archAspect, 1.0);
                 float2 wallFromCentre = (cellUv - 0.5) * float2(archAspect, 1.0);
                 float2 glassFromCentre = (glassCellUv - 0.5) * float2(archAspect, 1.0);
 
                 // Glass sits behind the wall, so the ray has to clear the opening at both ends or
                 // it struck the frame. No frac() on the far end - the overshoot is the occlusion.
-                float intoFrame = DistancePastOpening(wallFromCentre, openingHalfExtents);
-                float intoFrameAtGlass = DistancePastOpening(glassFromCentre, openingHalfExtents);
+                float intoFrame = DistancePastOpening(wallFromCentre, openingHalfExtents, archHeight);
+                float intoFrameAtGlass =
+                    DistancePastOpening(glassFromCentre, openingHalfExtents, archHeight);
                 float isPane = step(max(intoFrame, intoFrameAtGlass), 0.0);
 
                 // Bars sit on the glass, so they parallax with the interior instead of sliding
@@ -200,9 +217,12 @@ Shader "InteriorMapping/SingleFile"
                 float toCheckRail = abs(glassFromCentre.y -
                                         (_CheckRailHeight * 2.0 - 1.0) * openingHalfExtents.y);
 
-                float barDistance = min(min(toMuntin.x, toMuntin.y) - _MuntinWidth,
+                // A shopfront is plate glass between posts, so the sash bars drop out down there
+                // and only the mullion survives. The 1.0 is a distance no min() will ever pick.
+                float sashBarDistance = min(min(toMuntin.x, toMuntin.y) - _MuntinWidth,
+                                            toCheckRail - _CheckRailWidth);
+                float barDistance = min(lerp(sashBarDistance, 1.0, isGroundFloor),
                                         abs(glassFromCentre.x) - _MullionWidth);
-                barDistance = min(barDistance, toCheckRail - _CheckRailWidth);
                 float isBar = isPane * step(barDistance, 0.0);
 
                 // Roof and underside stay solid, or the building reads as a greenhouse.
@@ -232,7 +252,8 @@ Shader "InteriorMapping/SingleFile"
                 glassColor += _MainLightColor.rgb * sunGlint * _SunGlintStrength * lambert;
 
                 float2 facadeUv = TRANSFORM_TEX(input.uv, _BaseMap);
-                half3 wallColor = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, facadeUv).rgb * _FacadeColor.rgb;
+                half3 facadeTint = lerp(_FacadeColor.rgb, _GroundFloorColor.rgb, isGroundFloor);
+                half3 wallColor = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, facadeUv).rgb * facadeTint;
 
                 // intoFrame is negative inside the opening, so jamb and bar pixels land here too and
                 // take frame colour at full strength, which is what both of them want.
