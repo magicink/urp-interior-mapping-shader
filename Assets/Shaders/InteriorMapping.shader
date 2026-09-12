@@ -11,8 +11,12 @@ Shader "InteriorMapping/SingleFile"
         _FacadeColor("Facade Color", Color) = (0.48, 0.27, 0.22, 1)
         _WindowsPerFace("Windows Per Face (X, Y)", Vector) = (3, 2, 0, 0)
         _WindowFrameWidth("Window Frame Width", Range(0, 0.49)) = 0.16
+        _FrameColor("Frame Color", Color) = (0.86, 0.85, 0.82, 1)
+        _FrameThickness("Frame Thickness", Range(0, 0.25)) = 0.06
+        _RevealShading("Reveal Shading", Range(0, 1)) = 0.55
 
         [Header(Glass)]
+        _GlassRecessDepth("Glass Recess Depth", Range(0, 0.3)) = 0.09
         _GlassReflectivity("Glass Reflectivity", Range(0, 1)) = 0.9
         _SunGlintStrength("Sun Glint Strength", Range(0, 8)) = 2
         _SunGlintSharpness("Sun Glint Sharpness", Range(1, 512)) = 220
@@ -59,9 +63,13 @@ Shader "InteriorMapping/SingleFile"
             CBUFFER_START(UnityPerMaterial)
                 half4 _BaseColor;
                 half4 _FacadeColor;
+                half4 _FrameColor;
                 float4 _BaseMap_ST;
                 float4 _WindowsPerFace;
                 float _WindowFrameWidth;
+                float _FrameThickness;
+                float _RevealShading;
+                float _GlassRecessDepth;
                 float _GlassReflectivity;
                 float _SunGlintStrength;
                 float _SunGlintSharpness;
@@ -107,6 +115,9 @@ Shader "InteriorMapping/SingleFile"
                                         * 43758.5453);
                 float2 mirrorSigns = step(0.5, roomNoise) * 2.0 - 1.0;
                 float3 mirrorAxes = float3(mirrorSigns.x, 1.0, mirrorSigns.y);
+
+                // The facade is not mirrored, so its recess needs the ray as it really is.
+                float3 facadeRayDirection = viewRayDirection;
                 positionInRoom *= mirrorAxes;
                 viewRayDirection *= mirrorAxes;
 
@@ -129,8 +140,19 @@ Shader "InteriorMapping/SingleFile"
                 float isFacingX = step(0.5, abs(input.normalObjectSpace.x));
                 float2 cellUv = frac(float2(lerp(positionInGrid.x, positionInGrid.z, isFacingX),
                                             positionInGrid.y));
-                float2 withinPane = step(_WindowFrameWidth, cellUv) *
-                                    step(cellUv, 1.0 - _WindowFrameWidth);
+
+                // The same swap as cellUv, leaving the ray as across-the-face, up, into-the-wall.
+                float3 rayInFaceSpace = lerp(facadeRayDirection.xyz, facadeRayDirection.zyx, isFacingX);
+                float2 glassCellUv = cellUv + rayInFaceSpace.xy *
+                                     (_GlassRecessDepth / max(abs(rayInFaceSpace.z), 1e-4));
+
+                // Glass sits behind the wall, so the ray has to clear the opening at both ends or
+                // it struck the frame. No frac() on the far end - the overshoot is the occlusion.
+                float2 withinOpening = step(_WindowFrameWidth, cellUv) *
+                                       step(cellUv, 1.0 - _WindowFrameWidth);
+                float2 withinGlass = step(_WindowFrameWidth, glassCellUv) *
+                                     step(glassCellUv, 1.0 - _WindowFrameWidth);
+                float2 withinPane = withinOpening * withinGlass;
 
                 // Roof and underside stay solid, or the building reads as a greenhouse.
                 float isUpwardFace = step(0.5, abs(input.normalObjectSpace.y));
@@ -159,7 +181,20 @@ Shader "InteriorMapping/SingleFile"
                 glassColor += _MainLightColor.rgb * sunGlint * _SunGlintStrength * lambert;
 
                 float2 facadeUv = TRANSFORM_TEX(input.uv, _BaseMap);
-                half3 facadeColor = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, facadeUv).rgb * _FacadeColor.rgb;
+                half3 wallColor = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, facadeUv).rgb * _FacadeColor.rgb;
+
+                // How far past the opening edge the fragment sits, negative inside the opening.
+                // Jamb pixels land there too, which is why they take the deepest shading below.
+                float2 pastOpening = max(_WindowFrameWidth - cellUv, cellUv - (1.0 - _WindowFrameWidth));
+                float intoFrame = max(pastOpening.x, pastOpening.y);
+                float isFrame = step(intoFrame, _FrameThickness) * (1.0 - isUpwardFace);
+
+                // A reveal shades itself: dark under the lintel, bright where the sill catches sky.
+                float revealShade = 1.0 - saturate(intoFrame / max(_FrameThickness, 1e-4));
+                float lintelOrSill = 1.0 - 2.0 * step(0.5, cellUv.y);
+                half3 frameColor = _FrameColor.rgb * (1.0 + revealShade * lintelOrSill * _RevealShading);
+
+                half3 facadeColor = lerp(wallColor, frameColor, isFrame);
 
                 // The brick needs lighting to read as solid. The interior does not - it was lit
                 // when the cubemap was baked.
