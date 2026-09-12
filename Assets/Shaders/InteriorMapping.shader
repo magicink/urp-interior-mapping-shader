@@ -22,6 +22,13 @@ Shader "InteriorMapping/SingleFile"
         _FrameThickness("Frame Thickness", Range(0, 0.25)) = 0.06
         _RevealShading("Reveal Shading", Range(0, 1)) = 0.55
 
+        [Header(Brick)]
+        _MortarColor("Mortar Color", Color) = (0.78, 0.76, 0.71, 1)
+        _BrickSize("Brick Size Meters (L, H)", Vector) = (0.225, 0.075, 0, 0)
+        _MortarWidth("Mortar Width Meters", Range(0, 0.05)) = 0.012
+        _MortarDepth("Mortar Depth", Range(0, 1)) = 0.5
+        _BrickVariation("Brick Variation", Range(0, 1)) = 0.15
+
         [Header(Ground Floor)]
         [IntRange] _GroundFloorCount("Ground Floor Count", Range(0, 8)) = 1
         _GroundFloorFrameWidth("Ground Floor Frame Width", Range(0, 0.49)) = 0.06
@@ -86,13 +93,18 @@ Shader "InteriorMapping/SingleFile"
                 half4 _FrameColor;
                 half4 _GroundFloorColor;
                 half4 _BlindColor;
+                half4 _MortarColor;
                 float4 _BaseMap_ST;
                 float4 _WindowsPerFace;
                 float4 _MuntinsPerPane;
+                float4 _BrickSize;
                 float _WindowFrameWidth;
                 float _ArchHeight;
                 float _FrameThickness;
                 float _RevealShading;
+                float _MortarWidth;
+                float _MortarDepth;
+                float _BrickVariation;
                 float _GroundFloorCount;
                 float _GroundFloorFrameWidth;
                 float _GroundFloorArchHeight;
@@ -279,7 +291,39 @@ Shader "InteriorMapping/SingleFile"
 
                 float2 facadeUv = TRANSFORM_TEX(input.uv, _BaseMap);
                 half3 facadeTint = lerp(_FacadeColor.rgb, _GroundFloorColor.rgb, isGroundFloor);
-                half3 wallColor = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, facadeUv).rgb * facadeTint;
+                half3 facadeMap = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, facadeUv).rgb;
+
+                // Brick is a real-world size, so course it off object space scaled back up to
+                // metres. Driving it from the mesh unwrap would stretch it with the building.
+                float3 objectScale = float3(length(unity_ObjectToWorld._m00_m10_m20),
+                                            length(unity_ObjectToWorld._m01_m11_m21),
+                                            length(unity_ObjectToWorld._m02_m12_m22));
+                float3 positionMeters = input.positionObjectSpace * objectScale;
+                float2 wallMeters = float2(lerp(positionMeters.x, positionMeters.z, isFacingX),
+                                           positionMeters.y);
+
+                // Running bond: every other course slides half a brick along, which is one floor()
+                // of the course number. frac() then gives the position inside a single brick.
+                float2 brickSize = max(_BrickSize.xy, 1e-3);
+                float2 brickCoord = wallMeters / brickSize;
+                brickCoord.x += floor(brickCoord.y) * 0.5;
+                float2 insideBrick = frac(brickCoord);
+
+                // Back to metres for the joint test, so mortar width stays honest when the brick
+                // size changes underneath it.
+                float2 toBrickEdge = (0.5 - abs(insideBrick - 0.5)) * brickSize;
+                float mortarHalfWidth = max(_MortarWidth * 0.5, 1e-4);
+                float intoMortar = min(toBrickEdge.x, toBrickEdge.y) - mortarHalfWidth;
+                float isMortar = step(intoMortar, 0.0);
+
+                // A wall of identical bricks reads as wallpaper, the same way a block of identical
+                // rooms does. The roof is not bricked at all, so it keeps the flat tint.
+                float brickNoise = frac(sin(dot(floor(brickCoord),
+                                                float2(19.311, 47.853))) * 43758.5453);
+                float brickShade = lerp(1.0 - _BrickVariation, 1.0 + _BrickVariation, brickNoise);
+                float isBrickFace = 1.0 - isUpwardFace;
+                half3 brickWall = lerp(facadeTint * brickShade, _MortarColor.rgb, isMortar);
+                half3 wallColor = facadeMap * lerp(facadeTint, brickWall, isBrickFace);
 
                 // intoFrame is negative inside the opening, so jamb and bar pixels land here too and
                 // take frame colour at full strength, which is what both of them want.
@@ -293,9 +337,30 @@ Shader "InteriorMapping/SingleFile"
 
                 half3 facadeColor = lerp(wallColor, frameColor, isFrame);
 
+                // The joint is a channel: steepest where it meets the brick, flat at the bottom
+                // of it. Painted surrounds are smooth, so the frame band keeps the flat normal.
+                float jointSlope = isMortar * isBrickFace * (1.0 - isFrame) *
+                                   saturate(1.0 + intoMortar / mortarHalfWidth);
+                float2 nearestJointAxis = step(toBrickEdge.xy, toBrickEdge.yx);
+                float2 jointTilt = sign(insideBrick - 0.5) * nearestJointAxis *
+                                   (jointSlope * _MortarDepth);
+
+                // Box faces are axis aligned, so the tangent frame falls out of the normal and the
+                // mesh never has to carry tangents.
+                float3 brickTangent = lerp(float3(1, 0, 0), float3(0, 0, 1), isFacingX);
+                float3 facadeNormalObject = input.normalObjectSpace +
+                                            brickTangent * jointTilt.x +
+                                            float3(0, 1, 0) * jointTilt.y;
+                float3 facadeNormalWorld =
+                    normalize(TransformObjectToWorldNormal(facadeNormalObject));
+
+                // Only the brick gets the tilted normal. Glass reflects off the flat face, or the
+                // windows pick up mortar relief that is not there.
+                half facadeLambert = saturate(dot(facadeNormalWorld, _MainLightPosition.xyz));
+
                 // The brick needs lighting to read as solid. The interior does not - it was lit
                 // when the cubemap was baked.
-                half3 litFacade = facadeColor * (_MainLightColor.rgb * lambert + 0.25);
+                half3 litFacade = facadeColor * (_MainLightColor.rgb * facadeLambert + 0.25);
 
                 return half4(lerp(litFacade, glassColor, isWindow), 1);
             }
