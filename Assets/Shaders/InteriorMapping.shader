@@ -11,9 +11,17 @@ Shader "InteriorMapping/SingleFile"
         _FacadeColor("Facade Color", Color) = (0.48, 0.27, 0.22, 1)
         _WindowsPerFace("Windows Per Face (X, Y)", Vector) = (3, 2, 0, 0)
         _WindowFrameWidth("Window Frame Width", Range(0, 0.49)) = 0.16
+        _ArchHeight("Arch Height", Range(0, 1)) = 1
         _FrameColor("Frame Color", Color) = (0.86, 0.85, 0.82, 1)
         _FrameThickness("Frame Thickness", Range(0, 0.25)) = 0.06
         _RevealShading("Reveal Shading", Range(0, 1)) = 0.55
+
+        [Header(Glazing Bars)]
+        _MuntinsPerPane("Muntins Per Pane (X, Y)", Vector) = (2, 2, 0, 0)
+        _MuntinWidth("Muntin Width", Range(0, 0.05)) = 0.008
+        _MullionWidth("Mullion Width", Range(0, 0.08)) = 0.016
+        _CheckRailHeight("Check Rail Height", Range(0, 1)) = 0.5
+        _CheckRailWidth("Check Rail Width", Range(0, 0.08)) = 0.022
 
         [Header(Glass)]
         _GlassRecessDepth("Glass Recess Depth", Range(0, 0.3)) = 0.09
@@ -66,15 +74,37 @@ Shader "InteriorMapping/SingleFile"
                 half4 _FrameColor;
                 float4 _BaseMap_ST;
                 float4 _WindowsPerFace;
+                float4 _MuntinsPerPane;
                 float _WindowFrameWidth;
+                float _ArchHeight;
                 float _FrameThickness;
                 float _RevealShading;
+                float _MuntinWidth;
+                float _MullionWidth;
+                float _CheckRailHeight;
+                float _CheckRailWidth;
                 float _GlassRecessDepth;
                 float _GlassReflectivity;
                 float _SunGlintStrength;
                 float _SunGlintSharpness;
                 float _GlassFresnelPower;
             CBUFFER_END
+
+            // Distance past the edge of a window opening, negative inside. The max(.y, 0) collapses
+            // the vertical term below the springing, leaving straight jambs under a circular head.
+            float DistancePastOpening(float2 fromCentre, float2 halfExtents)
+            {
+                // The radius grows as the arch flattens, which keeps the crown at the top of the
+                // opening and turns a low setting into a shallow segmental head.
+                float headRadius = halfExtents.x / max(_ArchHeight, 0.05);
+                float springHeight = halfExtents.y - headRadius;
+
+                float boxDistance = max(abs(fromCentre.x) - halfExtents.x,
+                                        abs(fromCentre.y) - halfExtents.y);
+                float headDistance =
+                    length(float2(fromCentre.x, max(fromCentre.y - springHeight, 0.0))) - headRadius;
+                return max(boxDistance, headDistance);
+            }
 
             Varyings vert(Attributes input)
             {
@@ -146,17 +176,38 @@ Shader "InteriorMapping/SingleFile"
                 float2 glassCellUv = cellUv + rayInFaceSpace.xy *
                                      (_GlassRecessDepth / max(abs(rayInFaceSpace.z), 1e-4));
 
+                // A circular head in cell space would be an ellipse on the wall, so square the cell
+                // up from the room counts before measuring anything.
+                float archAspect = roomsPerAxis.y / lerp(roomsPerAxis.x, roomsPerAxis.z, isFacingX);
+                float2 openingHalfExtents = (0.5 - _WindowFrameWidth) * float2(archAspect, 1.0);
+                float2 wallFromCentre = (cellUv - 0.5) * float2(archAspect, 1.0);
+                float2 glassFromCentre = (glassCellUv - 0.5) * float2(archAspect, 1.0);
+
                 // Glass sits behind the wall, so the ray has to clear the opening at both ends or
                 // it struck the frame. No frac() on the far end - the overshoot is the occlusion.
-                float2 withinOpening = step(_WindowFrameWidth, cellUv) *
-                                       step(cellUv, 1.0 - _WindowFrameWidth);
-                float2 withinGlass = step(_WindowFrameWidth, glassCellUv) *
-                                     step(glassCellUv, 1.0 - _WindowFrameWidth);
-                float2 withinPane = withinOpening * withinGlass;
+                float intoFrame = DistancePastOpening(wallFromCentre, openingHalfExtents);
+                float intoFrameAtGlass = DistancePastOpening(glassFromCentre, openingHalfExtents);
+                float isPane = step(max(intoFrame, intoFrameAtGlass), 0.0);
+
+                // Bars sit on the glass, so they parallax with the interior instead of sliding
+                // across it. Everything here is a distance, so thin beats thick at every crossing.
+                float2 fromOpeningCorner = glassFromCentre + openingHalfExtents;
+                float2 muntinSpacing = (openingHalfExtents * 2.0) / max(_MuntinsPerPane.xy, 1.0);
+                float2 toMuntin = abs(fromOpeningCorner -
+                                      round(fromOpeningCorner / muntinSpacing) * muntinSpacing);
+
+                // The check rail is where two sashes overlap, so it is the thick horizontal one.
+                float toCheckRail = abs(glassFromCentre.y -
+                                        (_CheckRailHeight * 2.0 - 1.0) * openingHalfExtents.y);
+
+                float barDistance = min(min(toMuntin.x, toMuntin.y) - _MuntinWidth,
+                                        abs(glassFromCentre.x) - _MullionWidth);
+                barDistance = min(barDistance, toCheckRail - _CheckRailWidth);
+                float isBar = isPane * step(barDistance, 0.0);
 
                 // Roof and underside stay solid, or the building reads as a greenhouse.
                 float isUpwardFace = step(0.5, abs(input.normalObjectSpace.y));
-                float isWindow = withinPane.x * withinPane.y * (1.0 - isUpwardFace);
+                float isWindow = isPane * (1.0 - isBar) * (1.0 - isUpwardFace);
 
                 float3 normalWorld = normalize(TransformObjectToWorldNormal(input.normalObjectSpace));
                 half3 viewDirectionWorld = GetWorldSpaceNormalizeViewDir(input.positionWorldSpace);
@@ -183,16 +234,15 @@ Shader "InteriorMapping/SingleFile"
                 float2 facadeUv = TRANSFORM_TEX(input.uv, _BaseMap);
                 half3 wallColor = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, facadeUv).rgb * _FacadeColor.rgb;
 
-                // How far past the opening edge the fragment sits, negative inside the opening.
-                // Jamb pixels land there too, which is why they take the deepest shading below.
-                float2 pastOpening = max(_WindowFrameWidth - cellUv, cellUv - (1.0 - _WindowFrameWidth));
-                float intoFrame = max(pastOpening.x, pastOpening.y);
+                // intoFrame is negative inside the opening, so jamb and bar pixels land here too and
+                // take frame colour at full strength, which is what both of them want.
                 float isFrame = step(intoFrame, _FrameThickness) * (1.0 - isUpwardFace);
 
-                // A reveal shades itself: dark under the lintel, bright where the sill catches sky.
+                // A reveal shades by which way it faces: dark under the lintel, bright on the sill,
+                // neutral on the jambs. Ramped rather than flipped, or the jambs break at midheight.
                 float revealShade = 1.0 - saturate(intoFrame / max(_FrameThickness, 1e-4));
-                float lintelOrSill = 1.0 - 2.0 * step(0.5, cellUv.y);
-                half3 frameColor = _FrameColor.rgb * (1.0 + revealShade * lintelOrSill * _RevealShading);
+                float facingUp = clamp(-wallFromCentre.y / max(openingHalfExtents.y, 1e-4), -1.0, 1.0);
+                half3 frameColor = _FrameColor.rgb * (1.0 + revealShade * facingUp * _RevealShading);
 
                 half3 facadeColor = lerp(wallColor, frameColor, isFrame);
 
