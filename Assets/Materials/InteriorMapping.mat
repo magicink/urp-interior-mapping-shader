@@ -122,8 +122,8 @@ Material:
     - _EnvironmentReflections: 1
     - _FrameThickness: 0.016
     - _GlassFresnelPower: 2.36
-    - _GlassRecessDepth: 0.09
-    - _GlassReflectivity: 0.211
+    - _GlassRecessDepth: 0.067
+    - _GlassReflectivity: 0.295
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossyReflections: 0
@@ -132,6 +132,7 @@ Material:
     - _GroundFloorFrameWidth: 0.167
     - _Metallic: 0
     - _MortarDepth: 0.5
+    - _MortarOcclusion: 0.6
     - _MortarWidth: 0.012
     - _MullionWidth: 0.016
     - _MuntinWidth: 0.008
@@ -139,6 +140,7 @@ Material:
     - _Parallax: 0.005
     - _QueueOffset: 0
     - _ReceiveShadows: 1
+    - _RevealOcclusion: 0.5
     - _RevealShading: 0.55
     - _SlatCount: 14
     - _Smoothness: 0.5
@@ -147,7 +149,7 @@ Material:
     - _SrcBlend: 1
     - _SrcBlendAlpha: 1
     - _SunGlintSharpness: 7
-    - _SunGlintStrength: 0.31
+    - _SunGlintStrength: 0.46
     - _Surface: 0
     - _WindowFrameWidth: 0.199
     - _WorkflowMode: 1

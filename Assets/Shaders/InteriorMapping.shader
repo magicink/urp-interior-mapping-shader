@@ -21,12 +21,14 @@ Shader "InteriorMapping/SingleFile"
         _FrameColor("Frame Color", Color) = (0.86, 0.85, 0.82, 1)
         _FrameThickness("Frame Thickness", Range(0, 0.25)) = 0.06
         _RevealShading("Reveal Shading", Range(0, 1)) = 0.55
+        _RevealOcclusion("Reveal Occlusion", Range(0, 1)) = 0.5
 
         [Header(Brick)]
         _MortarColor("Mortar Color", Color) = (0.78, 0.76, 0.71, 1)
         _BrickSize("Brick Size Meters (L, H)", Vector) = (0.225, 0.075, 0, 0)
         _MortarWidth("Mortar Width Meters", Range(0, 0.05)) = 0.012
         _MortarDepth("Mortar Depth", Range(0, 1)) = 0.5
+        _MortarOcclusion("Mortar Occlusion", Range(0, 1)) = 0.6
         _BrickVariation("Brick Variation", Range(0, 1)) = 0.15
 
         [Header(Ground Floor)]
@@ -102,8 +104,10 @@ Shader "InteriorMapping/SingleFile"
                 float _ArchHeight;
                 float _FrameThickness;
                 float _RevealShading;
+                float _RevealOcclusion;
                 float _MortarWidth;
                 float _MortarDepth;
+                float _MortarOcclusion;
                 float _BrickVariation;
                 float _GroundFloorCount;
                 float _GroundFloorFrameWidth;
@@ -136,6 +140,15 @@ Shader "InteriorMapping/SingleFile"
                 float headDistance =
                     length(float2(fromCentre.x, max(fromCentre.y - springHeight, 0.0))) - headRadius;
                 return max(boxDistance, headDistance);
+            }
+
+            // URP keeps the ambient probe in SH coefficients. Core.hlsl declares them, but the
+            // SampleSH wrapper lives in Lighting.hlsl, which is a lot of BRDF for one probe read.
+            half3 SampleAmbientProbe(half3 normalWorld)
+            {
+                real4 coefficients[7] = { unity_SHAr, unity_SHAg, unity_SHAb,
+                                          unity_SHBr, unity_SHBg, unity_SHBb, unity_SHC };
+                return max(half3(0.0, 0.0, 0.0), SampleSH9(coefficients, normalWorld));
             }
 
             Varyings vert(Attributes input)
@@ -321,9 +334,9 @@ Shader "InteriorMapping/SingleFile"
                 float brickNoise = frac(sin(dot(floor(brickCoord),
                                                 float2(19.311, 47.853))) * 43758.5453);
                 float brickShade = lerp(1.0 - _BrickVariation, 1.0 + _BrickVariation, brickNoise);
-                float isBrickFace = 1.0 - isUpwardFace;
+                float isWallFace = 1.0 - isUpwardFace;
                 half3 brickWall = lerp(facadeTint * brickShade, _MortarColor.rgb, isMortar);
-                half3 wallColor = facadeMap * lerp(facadeTint, brickWall, isBrickFace);
+                half3 wallColor = facadeMap * lerp(facadeTint, brickWall, isWallFace);
 
                 // intoFrame is negative inside the opening, so jamb and bar pixels land here too and
                 // take frame colour at full strength, which is what both of them want.
@@ -339,7 +352,7 @@ Shader "InteriorMapping/SingleFile"
 
                 // The joint is a channel: steepest where it meets the brick, flat at the bottom
                 // of it. Painted surrounds are smooth, so the frame band keeps the flat normal.
-                float jointSlope = isMortar * isBrickFace * (1.0 - isFrame) *
+                float jointSlope = isMortar * isWallFace * (1.0 - isFrame) *
                                    saturate(1.0 + intoMortar / mortarHalfWidth);
                 float2 nearestJointAxis = step(toBrickEdge.xy, toBrickEdge.yx);
                 float2 jointTilt = sign(insideBrick - 0.5) * nearestJointAxis *
@@ -358,9 +371,20 @@ Shader "InteriorMapping/SingleFile"
                 // windows pick up mortar relief that is not there.
                 half facadeLambert = saturate(dot(facadeNormalWorld, _MainLightPosition.xyz));
 
+                // Occlusion rides the ambient, not the sun. That is the whole point - relief lit
+                // only by lambert vanishes the moment a face turns away from the light.
+                float mortarOcclusion = _MortarOcclusion * isWallFace *
+                                        saturate(-intoMortar / mortarHalfWidth);
+                float revealOcclusion = _RevealOcclusion * revealShade * isWallFace;
+
+                // Two independent occluders multiply rather than add, so a joint inside a reveal
+                // goes darker than either alone without either one needing to be clamped.
+                float facadeOcclusion = (1.0 - mortarOcclusion) * (1.0 - revealOcclusion);
+
                 // The brick needs lighting to read as solid. The interior does not - it was lit
                 // when the cubemap was baked.
-                half3 litFacade = facadeColor * (_MainLightColor.rgb * facadeLambert + 0.25);
+                half3 ambient = SampleAmbientProbe(facadeNormalWorld) * facadeOcclusion;
+                half3 litFacade = facadeColor * (_MainLightColor.rgb * facadeLambert + ambient);
 
                 return half4(lerp(litFacade, glassColor, isWindow), 1);
             }
