@@ -11,6 +11,12 @@ Shader "InteriorMapping/SingleFile"
         _FacadeColor("Facade Color", Color) = (0.48, 0.27, 0.22, 1)
         _WindowsPerFace("Windows Per Face (X, Y)", Vector) = (3, 2, 0, 0)
         _WindowFrameWidth("Window Frame Width", Range(0, 0.49)) = 0.16
+
+        [Header(Glass)]
+        _GlassReflectivity("Glass Reflectivity", Range(0, 1)) = 0.9
+        _SunGlintStrength("Sun Glint Strength", Range(0, 8)) = 2
+        _SunGlintSharpness("Sun Glint Sharpness", Range(1, 512)) = 220
+        _GlassFresnelPower("Glass Fresnel Power", Range(1, 8)) = 5
     }
 
     SubShader
@@ -25,6 +31,8 @@ Shader "InteriorMapping/SingleFile"
             #pragma fragment frag
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            // Core.hlsl declares unity_SpecCube0 but not the decode for it.
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/EntityLighting.hlsl"
 
             struct Attributes
             {
@@ -39,6 +47,7 @@ Shader "InteriorMapping/SingleFile"
                 float2 uv : TEXCOORD0;
                 float3 positionObjectSpace : TEXCOORD1;
                 float3 normalObjectSpace : TEXCOORD2;
+                float3 positionWorldSpace : TEXCOORD3;
             };
 
             TEXTURE2D(_BaseMap);
@@ -53,12 +62,17 @@ Shader "InteriorMapping/SingleFile"
                 float4 _BaseMap_ST;
                 float4 _WindowsPerFace;
                 float _WindowFrameWidth;
+                float _GlassReflectivity;
+                float _SunGlintStrength;
+                float _SunGlintSharpness;
+                float _GlassFresnelPower;
             CBUFFER_END
 
             Varyings vert(Attributes input)
             {
                 Varyings output;
-                output.positionClipSpace = TransformObjectToHClip(input.positionObjectSpace.xyz);
+                output.positionWorldSpace = TransformObjectToWorld(input.positionObjectSpace.xyz);
+                output.positionClipSpace = TransformWorldToHClip(output.positionWorldSpace);
                 output.uv = input.uv;
                 output.positionObjectSpace = input.positionObjectSpace.xyz;
                 output.normalObjectSpace = input.normalObjectSpace;
@@ -122,16 +136,36 @@ Shader "InteriorMapping/SingleFile"
                 float isUpwardFace = step(0.5, abs(input.normalObjectSpace.y));
                 float isWindow = withinPane.x * withinPane.y * (1.0 - isUpwardFace);
 
+                float3 normalWorld = normalize(TransformObjectToWorldNormal(input.normalObjectSpace));
+                half3 viewDirectionWorld = GetWorldSpaceNormalizeViewDir(input.positionWorldSpace);
+                half lambert = saturate(dot(normalWorld, _MainLightPosition.xyz));
+
+                // Glass turns mirror as the view flattens out, which is the same angle where the
+                // interior ray skids along one wall and the parallax stops convincing. One dot
+                // product drives both, so the glare peaks exactly where it is needed to hide it.
+                half grazing = pow(1.0 - saturate(dot(normalWorld, viewDirectionWorld)), _GlassFresnelPower);
+                half reflectionAmount = lerp(0.04, 1.0, grazing) * _GlassReflectivity;
+
+                half4 encodedSky = SAMPLE_TEXTURECUBE_LOD(
+                    unity_SpecCube0, samplerunity_SpecCube0, reflect(-viewDirectionWorld, normalWorld), 0);
+                half3 skyColor = DecodeHDREnvironment(encodedSky, unity_SpecCube0_HDR);
+
+                // Each face is flat, so this is constant across it and a whole wall of windows
+                // flashes together as the sun lines up.
+                float3 halfVector = normalize(viewDirectionWorld + _MainLightPosition.xyz);
+                half sunGlint = pow(saturate(dot(normalWorld, halfVector)), _SunGlintSharpness);
+
+                half3 glassColor = lerp(interiorColor * _BaseColor.rgb, skyColor, reflectionAmount);
+                glassColor += _MainLightColor.rgb * sunGlint * _SunGlintStrength * lambert;
+
                 float2 facadeUv = TRANSFORM_TEX(input.uv, _BaseMap);
                 half3 facadeColor = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, facadeUv).rgb * _FacadeColor.rgb;
 
                 // The brick needs lighting to read as solid. The interior does not - it was lit
                 // when the cubemap was baked.
-                float3 normalWorld = TransformObjectToWorldNormal(input.normalObjectSpace);
-                half lambert = saturate(dot(normalWorld, _MainLightPosition.xyz));
                 half3 litFacade = facadeColor * (_MainLightColor.rgb * lambert + 0.25);
 
-                return half4(lerp(litFacade, interiorColor * _BaseColor.rgb, isWindow), 1);
+                return half4(lerp(litFacade, glassColor, isWindow), 1);
             }
             ENDHLSL
         }

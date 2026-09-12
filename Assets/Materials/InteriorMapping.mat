@@ -114,6 +114,8 @@ Material:
     - _DstBlend: 0
     - _DstBlendAlpha: 0
     - _EnvironmentReflections: 1
+    - _GlassFresnelPower: 2.36
+    - _GlassReflectivity: 0.211
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossyReflections: 0
@@ -127,16 +129,18 @@ Material:
     - _SpecularHighlights: 1
     - _SrcBlend: 1
     - _SrcBlendAlpha: 1
+    - _SunGlintSharpness: 7
+    - _SunGlintStrength: 0.31
     - _Surface: 0
-    - _WindowFrameWidth: 0.16
+    - _WindowFrameWidth: 0.199
     - _WorkflowMode: 1
     - _XRMotionVectorsPass: 1
     - _ZWrite: 1
     m_Colors:
-    - _BaseColor: {r: 1, g: 1, b: 1, a: 1}
+    - _BaseColor: {r: 0.8074938, g: 0.8109462, b: 0.8113208, a: 1}
     - _Color: {r: 1, g: 1, b: 1, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
-    - _FacadeColor: {r: 0.47999996, g: 0.26999995, b: 0.21999997, a: 1}
+    - _FacadeColor: {r: 0.2924528, g: 0.18147741, b: 0.17519578, a: 1}
     - _SpecColor: {r: 0.19999996, g: 0.19999996, b: 0.19999996, a: 1}
     - _WindowsPerFace: {r: 3, g: 2, b: 0, a: 0}
   m_BuildTextureStacks: []
