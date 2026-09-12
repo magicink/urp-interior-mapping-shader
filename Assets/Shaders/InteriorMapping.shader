@@ -350,9 +350,12 @@ Shader "InteriorMapping/SingleFile"
 
                 half3 facadeColor = lerp(wallColor, frameColor, isFrame);
 
-                // The joint is a channel: steepest where it meets the brick, flat at the bottom
-                // of it. Painted surrounds are smooth, so the frame band keeps the flat normal.
-                float jointSlope = isMortar * isWallFace * (1.0 - isFrame) *
+                // Brick stops at the painted surround. The relief below and the occlusion further
+                // down both have to honour that, or the joint grid carries on over the window.
+                float isExposedBrick = isWallFace * (1.0 - isFrame);
+
+                // The joint is a channel: steepest where it meets the brick, flat at the bottom.
+                float jointSlope = isMortar * isExposedBrick *
                                    saturate(1.0 + intoMortar / mortarHalfWidth);
                 float2 nearestJointAxis = step(toBrickEdge.xy, toBrickEdge.yx);
                 float2 jointTilt = sign(insideBrick - 0.5) * nearestJointAxis *
@@ -373,7 +376,7 @@ Shader "InteriorMapping/SingleFile"
 
                 // Occlusion rides the ambient, not the sun. That is the whole point - relief lit
                 // only by lambert vanishes the moment a face turns away from the light.
-                float mortarOcclusion = _MortarOcclusion * isWallFace *
+                float mortarOcclusion = _MortarOcclusion * isExposedBrick *
                                         saturate(-intoMortar / mortarHalfWidth);
                 float revealOcclusion = _RevealOcclusion * revealShade * isWallFace;
 
