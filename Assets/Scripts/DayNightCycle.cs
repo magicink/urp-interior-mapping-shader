@@ -11,6 +11,8 @@ namespace InteriorMapping
     /// The facade reads the ambient probe and the glass reflects the environment cubemap, so
     /// rotating the light alone would leave a building lit at noon standing under a midnight sky.
     /// Ambient moves to Trilight, which gives the probe a direction the brick normals can use.
+    /// Night runs on ambient alone: the sun really does go under the horizon, so the procedural
+    /// sky darkens on its own rather than being talked into it against its own scattering.
     /// Editing the ramps on an existing component does nothing until it is Reset - Unity only
     /// calls Reset() when the component is first added, and the old values are already serialized.
     /// </remarks>
@@ -25,15 +27,15 @@ namespace InteriorMapping
         [Tooltip("Hour the cycle starts from.")]
         [SerializeField] [Range(0f, 24f)] private float _startHour = 7f;
 
-        [Header("Sun and Moon")]
+        [Header("Sun")]
         [Tooltip("Compass bearing the sun rises from, in degrees.")]
         [SerializeField] [Range(-180f, 180f)] private float _sunriseBearing = -30f;
 
-        [Tooltip("Light colour across one day. The night half of the ramp is the moon.")]
+        [Tooltip("Sun colour across one day. The night half never shows; intensity is zero.")]
         [FormerlySerializedAs("_sunColor")]
         [SerializeField] private Gradient _lightColor;
 
-        [Tooltip("Light intensity across one day. Must reach zero at both horizon crossings.")]
+        [Tooltip("Sun intensity across one day. Keep it at zero below the horizon.")]
         [FormerlySerializedAs("_sunIntensity")]
         [SerializeField] private AnimationCurve _lightIntensity;
 
@@ -48,17 +50,10 @@ namespace InteriorMapping
         [SerializeField] private Gradient _groundColor;
 
         [Header("Environment")]
-        [Tooltip("Sky brightness across one day. Needs a skybox with an _Exposure property.")]
-        [SerializeField] private AnimationCurve _skyExposure;
-
         [Tooltip("Seconds between reflection cubemap refreshes. Zero leaves it alone.")]
         [SerializeField] private float _reflectionRefreshSeconds = 0.25f;
 
-        private static readonly int SkyboxExposureId = Shader.PropertyToID("_Exposure");
-
         private Light _sunLight;
-        private Material _originalSkybox;
-        private Material _skyboxInstance;
         private float _timeOfDay;
         private float _secondsSinceReflectionRefresh;
 
@@ -81,18 +76,6 @@ namespace InteriorMapping
             // Otherwise the procedural skybox picks its sun by brightness, which changes as we dim.
             RenderSettings.sun = _sunLight;
 
-            // The moon swings overhead, and a procedural sky scatters that as noon. One light
-            // cannot be under the horizon for the sky and over it for the shader, so sky
-            // brightness is driven on its own curve instead of falling out of the sun angle.
-            _originalSkybox = RenderSettings.skybox;
-
-            if (_originalSkybox != null && _originalSkybox.HasProperty(SkyboxExposureId))
-            {
-                // Instanced, or this edits the shared skybox asset for the whole project.
-                _skyboxInstance = new Material(_originalSkybox);
-                RenderSettings.skybox = _skyboxInstance;
-            }
-
             ApplyTimeOfDay();
         }
 
@@ -109,17 +92,9 @@ namespace InteriorMapping
         {
             float dayFraction = _timeOfDay / 24f;
 
-            // Minus 90 puts midnight at straight up, which lands 6am on the horizon.
-            float sunPitch = dayFraction * 360f - 90f;
-
-            // URP has one main light and the shader reads only that, so a separate moon would
-            // light nothing. The same light swings back overhead below the horizon instead,
-            // tracing the mirrored arc a moon would. Intensity is zero at the swap, hiding it.
-            bool sunIsAboveHorizon = Mathf.Sin(sunPitch * Mathf.Deg2Rad) > 0f;
-            float lightPitch = sunIsAboveHorizon ? sunPitch : sunPitch + 180f;
-
             // Pitch alone would sweep one fixed arc; the bearing yaws it round the compass.
-            transform.rotation = Quaternion.Euler(lightPitch, _sunriseBearing, 0f);
+            // Minus 90 puts midnight at straight down, which lands 6am on the horizon.
+            transform.rotation = Quaternion.Euler(dayFraction * 360f - 90f, _sunriseBearing, 0f);
 
             _sunLight.color = _lightColor.Evaluate(dayFraction);
 
@@ -130,24 +105,6 @@ namespace InteriorMapping
             RenderSettings.ambientSkyColor = _skyColor.Evaluate(dayFraction);
             RenderSettings.ambientEquatorColor = _equatorColor.Evaluate(dayFraction);
             RenderSettings.ambientGroundColor = _groundColor.Evaluate(dayFraction);
-
-            if (_skyboxInstance != null)
-            {
-                float exposure = Mathf.Max(_skyExposure.Evaluate(dayFraction), 0f);
-                _skyboxInstance.SetFloat(SkyboxExposureId, exposure);
-            }
-        }
-
-        private void OnDestroy()
-        {
-            // Play mode would revert this anyway, but leaving a stray material behind would not.
-            if (_skyboxInstance == null)
-            {
-                return;
-            }
-
-            RenderSettings.skybox = _originalSkybox;
-            Destroy(_skyboxInstance);
         }
 
         private void RefreshReflectionOnSchedule()
@@ -174,7 +131,8 @@ namespace InteriorMapping
         {
             if (!onlyIfMissing || _lightColor == null)
             {
-                // Cold at both ends, where the light is standing in for moonlight.
+                // Warm through both horizon crossings, neutral at noon. The cold night ends
+                // never show while intensity is zero, but are there if it is ever raised.
                 _lightColor = BuildGradient(
                     (0.00f, new Color(0.55f, 0.65f, 0.95f)),
                     (0.18f, new Color(0.55f, 0.62f, 0.90f)),
@@ -188,32 +146,24 @@ namespace InteriorMapping
 
             if (!onlyIfMissing || _lightIntensity == null || _lightIntensity.length == 0)
             {
-                // The zeroes at 0.25 and 0.75 are load bearing: that is where the light flips
-                // from sun to moon, and anything above zero there shows the swap as a pop.
+                // Zero whenever the sun is under the horizon. It points upward down there, so any
+                // intensity at all would light the walls from below. Night runs on ambient alone.
                 _lightIntensity = BuildCurve(
-                    (0.00f, 0.18f), (0.18f, 0.16f), (0.23f, 0.04f), (0.25f, 0f), (0.30f, 0.45f),
-                    (0.38f, 1.5f), (0.50f, 2f), (0.62f, 1.5f), (0.70f, 0.45f), (0.75f, 0f),
-                    (0.77f, 0.04f), (0.82f, 0.16f), (1.00f, 0.18f));
-            }
-
-            if (!onlyIfMissing || _skyExposure == null || _skyExposure.length == 0)
-            {
-                // Unity's procedural skybox sits at 1.3 by default, so that is the daytime peak.
-                _skyExposure = BuildCurve(
-                    (0.00f, 0.10f), (0.20f, 0.12f), (0.25f, 0.55f), (0.33f, 1.2f), (0.50f, 1.3f),
-                    (0.67f, 1.2f), (0.75f, 0.55f), (0.80f, 0.12f), (1.00f, 0.10f));
+                    (0.00f, 0f), (0.23f, 0f), (0.26f, 0.15f), (0.32f, 0.8f), (0.40f, 1.6f),
+                    (0.50f, 2f), (0.60f, 1.6f), (0.68f, 0.8f), (0.74f, 0.15f), (0.77f, 0f),
+                    (1.00f, 0f));
             }
 
             if (!onlyIfMissing || _skyColor == null)
             {
                 _skyColor = BuildGradient(
-                    (0.00f, new Color(0.05f, 0.07f, 0.14f)),
-                    (0.23f, new Color(0.12f, 0.12f, 0.20f)),
+                    (0.00f, new Color(0.10f, 0.13f, 0.22f)),
+                    (0.23f, new Color(0.16f, 0.18f, 0.28f)),
                     (0.30f, new Color(0.35f, 0.40f, 0.58f)),
                     (0.50f, new Color(0.45f, 0.56f, 0.78f)),
                     (0.72f, new Color(0.36f, 0.32f, 0.40f)),
-                    (0.80f, new Color(0.10f, 0.10f, 0.18f)),
-                    (1.00f, new Color(0.05f, 0.07f, 0.14f)));
+                    (0.80f, new Color(0.14f, 0.16f, 0.26f)),
+                    (1.00f, new Color(0.10f, 0.13f, 0.22f)));
             }
 
             if (!onlyIfMissing || _equatorColor == null)
@@ -221,23 +171,23 @@ namespace InteriorMapping
                 // The facade sees this one almost exclusively, so its night end is what decides
                 // whether the brick stays readable after dark.
                 _equatorColor = BuildGradient(
-                    (0.00f, new Color(0.06f, 0.07f, 0.12f)),
-                    (0.24f, new Color(0.20f, 0.14f, 0.14f)),
+                    (0.00f, new Color(0.13f, 0.15f, 0.22f)),
+                    (0.24f, new Color(0.22f, 0.17f, 0.18f)),
                     (0.30f, new Color(0.34f, 0.30f, 0.28f)),
                     (0.50f, new Color(0.42f, 0.43f, 0.44f)),
                     (0.72f, new Color(0.34f, 0.24f, 0.18f)),
-                    (0.79f, new Color(0.09f, 0.09f, 0.14f)),
-                    (1.00f, new Color(0.06f, 0.07f, 0.12f)));
+                    (0.79f, new Color(0.16f, 0.16f, 0.22f)),
+                    (1.00f, new Color(0.13f, 0.15f, 0.22f)));
             }
 
             if (!onlyIfMissing || _groundColor == null)
             {
                 _groundColor = BuildGradient(
-                    (0.00f, new Color(0.02f, 0.02f, 0.04f)),
+                    (0.00f, new Color(0.04f, 0.04f, 0.07f)),
                     (0.28f, new Color(0.08f, 0.07f, 0.06f)),
                     (0.50f, new Color(0.18f, 0.16f, 0.13f)),
                     (0.74f, new Color(0.08f, 0.06f, 0.05f)),
-                    (1.00f, new Color(0.02f, 0.02f, 0.04f)));
+                    (1.00f, new Color(0.04f, 0.04f, 0.07f)));
             }
         }
 
