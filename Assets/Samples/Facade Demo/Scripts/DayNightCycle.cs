@@ -31,6 +31,10 @@ namespace PyxlMedia.InteriorMapping.Samples
         [Tooltip("Compass bearing the sun rises from, in degrees.")]
         [SerializeField] [Range(-180f, 180f)] private float _sunriseBearing = -30f;
 
+        [Tooltip("Leans the sun's arc away from overhead, so shadows swing round as the day goes. " +
+                 "The sign picks the side.")]
+        [SerializeField] [Range(-60f, 60f)] private float _arcTilt = -10f;
+
         [Tooltip("Sun colour across one day. The night half never shows; intensity is zero.")]
         [FormerlySerializedAs("_sunColor")]
         [SerializeField] private Gradient _lightColor;
@@ -92,9 +96,11 @@ namespace PyxlMedia.InteriorMapping.Samples
         {
             float dayFraction = _timeOfDay / 24f;
 
-            // Pitch alone would sweep one fixed arc; the bearing yaws it round the compass.
+            // Pitch sweeps the arc, rolling about the sunrise-sunset line leans it off overhead, and yaw aims it.
             // Minus 90 puts midnight at straight down, which lands 6am on the horizon.
-            transform.rotation = Quaternion.Euler(dayFraction * 360f - 90f, _sunriseBearing, 0f);
+            transform.rotation = Quaternion.Euler(0f, _sunriseBearing, 0f) *
+                                 Quaternion.Euler(0f, 0f, _arcTilt) *
+                                 Quaternion.Euler(dayFraction * 360f - 90f, 0f, 0f);
 
             _sunLight.color = _lightColor.Evaluate(dayFraction);
 

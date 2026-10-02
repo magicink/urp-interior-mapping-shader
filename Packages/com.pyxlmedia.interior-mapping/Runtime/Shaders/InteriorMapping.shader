@@ -56,16 +56,67 @@ Shader "InteriorMapping/SingleFile"
     {
         Tags { "RenderType" = "Opaque" "RenderPipeline" = "UniversalPipeline" }
 
+        HLSLINCLUDE
+        #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+        // Declared once for every pass, since the SRP Batcher needs the layout identical across them.
+        CBUFFER_START(UnityPerMaterial)
+            half4 _BaseColor;
+            half4 _FacadeColor;
+            half4 _FrameColor;
+            half4 _GroundFloorColor;
+            half4 _BlindColor;
+            half4 _MortarColor;
+            float4 _BaseMap_ST;
+            float4 _WindowsPerFace;
+            float4 _MuntinsPerPane;
+            float4 _BrickSize;
+            float _WindowFrameWidth;
+            float _ArchHeight;
+            float _FrameThickness;
+            float _RevealShading;
+            float _RevealOcclusion;
+            float _MortarWidth;
+            float _MortarDepth;
+            float _MortarOcclusion;
+            float _BrickVariation;
+            float _GroundFloorCount;
+            float _GroundFloorFrameWidth;
+            float _GroundFloorArchHeight;
+            float _MuntinWidth;
+            float _MullionWidth;
+            float _CheckRailHeight;
+            float _CheckRailWidth;
+            float _BlindDepth;
+            float _BlindCoverage;
+            float _SlatCount;
+            float _GlassRecessDepth;
+            float _GlassReflectivity;
+            float _SunGlintStrength;
+            float _SunGlintSharpness;
+            float _GlassFresnelPower;
+        CBUFFER_END
+        ENDHLSL
+
         Pass
         {
+            Name "ForwardLit"
+            Tags { "LightMode" = "UniversalForward" }
+
             HLSLPROGRAM
 
             #pragma vertex vert
             #pragma fragment frag
 
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            // The shadow coordinate is found per pixel, so the vertex stage needs no variants.
+            #pragma multi_compile_fragment _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
+            #pragma multi_compile_fragment _ _SHADOWS_SOFT _SHADOWS_SOFT_LOW _SHADOWS_SOFT_MEDIUM _SHADOWS_SOFT_HIGH
+            #pragma multi_compile_fragment _ _SCREEN_SPACE_OCCLUSION
+
             // Core.hlsl declares unity_SpecCube0 but not the decode for it.
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/EntityLighting.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Shadows.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/AmbientOcclusion.hlsl"
 
             struct Attributes
             {
@@ -88,43 +139,6 @@ Shader "InteriorMapping/SingleFile"
 
             TEXTURECUBE(_InteriorCubemap);
             SAMPLER(sampler_InteriorCubemap);
-
-            CBUFFER_START(UnityPerMaterial)
-                half4 _BaseColor;
-                half4 _FacadeColor;
-                half4 _FrameColor;
-                half4 _GroundFloorColor;
-                half4 _BlindColor;
-                half4 _MortarColor;
-                float4 _BaseMap_ST;
-                float4 _WindowsPerFace;
-                float4 _MuntinsPerPane;
-                float4 _BrickSize;
-                float _WindowFrameWidth;
-                float _ArchHeight;
-                float _FrameThickness;
-                float _RevealShading;
-                float _RevealOcclusion;
-                float _MortarWidth;
-                float _MortarDepth;
-                float _MortarOcclusion;
-                float _BrickVariation;
-                float _GroundFloorCount;
-                float _GroundFloorFrameWidth;
-                float _GroundFloorArchHeight;
-                float _MuntinWidth;
-                float _MullionWidth;
-                float _CheckRailHeight;
-                float _CheckRailWidth;
-                float _BlindDepth;
-                float _BlindCoverage;
-                float _SlatCount;
-                float _GlassRecessDepth;
-                float _GlassReflectivity;
-                float _SunGlintStrength;
-                float _SunGlintSharpness;
-                float _GlassFresnelPower;
-            CBUFFER_END
 
             // Distance past the edge of a window opening, negative inside. The max(.y, 0) collapses
             // the vertical term below the springing, leaving straight jambs under a circular head.
@@ -269,6 +283,11 @@ Shader "InteriorMapping/SingleFile"
                 half3 viewDirectionWorld = GetWorldSpaceNormalizeViewDir(input.positionWorldSpace);
                 half lambert = saturate(dot(normalWorld, _MainLightPosition.xyz));
 
+                // Only sunlight is shadowed. The interior and the sky in the glass bring their own light.
+                float4 shadowCoord = TransformWorldToShadowCoord(input.positionWorldSpace);
+                half sunShadow = MainLightShadow(shadowCoord, input.positionWorldSpace,
+                                                 half4(1, 1, 1, 1), _MainLightOcclusionProbes);
+
                 // Glass turns mirror as the view flattens out, which is the same angle where the
                 // interior ray skids along one wall and the parallax stops convincing. One dot
                 // product drives both, so the glare peaks exactly where it is needed to hide it.
@@ -300,7 +319,7 @@ Shader "InteriorMapping/SingleFile"
                                          _BlindColor.rgb * slatShade, isBlind);
 
                 half3 glassColor = lerp(behindGlass, skyColor, reflectionAmount);
-                glassColor += _MainLightColor.rgb * sunGlint * _SunGlintStrength * lambert;
+                glassColor += _MainLightColor.rgb * sunGlint * _SunGlintStrength * lambert * sunShadow;
 
                 float2 facadeUv = TRANSFORM_TEX(input.uv, _BaseMap);
                 half3 facadeTint = lerp(_FacadeColor.rgb, _GroundFloorColor.rgb, isGroundFloor);
@@ -384,13 +403,71 @@ Shader "InteriorMapping/SingleFile"
                 // goes darker than either alone without either one needing to be clamped.
                 float facadeOcclusion = (1.0 - mortarOcclusion) * (1.0 - revealOcclusion);
 
+                // SSAO splits as in URP's Lit: all of it on the ambient, the renderer's direct share on the sun.
+                AmbientOcclusionFactor screenOcclusion =
+                    GetScreenSpaceAmbientOcclusion(GetNormalizedScreenSpaceUV(input.positionClipSpace));
+
                 // The brick needs lighting to read as solid. The interior does not - it was lit
                 // when the cubemap was baked.
-                half3 ambient = SampleAmbientProbe(facadeNormalWorld) * facadeOcclusion;
-                half3 litFacade = facadeColor * (_MainLightColor.rgb * facadeLambert + ambient);
+                half3 ambient = SampleAmbientProbe(facadeNormalWorld) * facadeOcclusion *
+                                screenOcclusion.indirectAmbientOcclusion;
+                half3 sunLight = _MainLightColor.rgb * facadeLambert * sunShadow *
+                                 screenOcclusion.directAmbientOcclusion;
+                half3 litFacade = facadeColor * (sunLight + ambient);
 
                 return half4(lerp(litFacade, glassColor, isWindow), 1);
             }
+            ENDHLSL
+        }
+
+        // URP's pass files only read material properties for alpha test, so they work against this CBUFFER as is.
+        Pass
+        {
+            Name "ShadowCaster"
+            Tags { "LightMode" = "ShadowCaster" }
+
+            ColorMask 0
+
+            HLSLPROGRAM
+            #pragma vertex ShadowPassVertex
+            #pragma fragment ShadowPassFragment
+
+            // Point and spot shadows bias away from the light's position instead of along one direction.
+            #pragma multi_compile_vertex _ _CASTING_PUNCTUAL_LIGHT_SHADOW
+
+            #include "Packages/com.unity.render-pipelines.universal/Shaders/ShadowCasterPass.hlsl"
+            ENDHLSL
+        }
+
+        // Depth prepasses skip objects without this, leaving them out of the camera depth texture.
+        Pass
+        {
+            Name "DepthOnly"
+            Tags { "LightMode" = "DepthOnly" }
+
+            ColorMask R
+
+            HLSLPROGRAM
+            #pragma vertex DepthOnlyVertex
+            #pragma fragment DepthOnlyFragment
+
+            #include "Packages/com.unity.render-pipelines.universal/Shaders/DepthOnlyPass.hlsl"
+            ENDHLSL
+        }
+
+        // SSAO reads normals from here. Flat face normals are enough: the mortar is far finer than its radius.
+        Pass
+        {
+            Name "DepthNormals"
+            Tags { "LightMode" = "DepthNormals" }
+
+            HLSLPROGRAM
+            #pragma vertex DepthNormalsVertex
+            #pragma fragment DepthNormalsFragment
+
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/RenderingLayers.hlsl"
+
+            #include "Packages/com.unity.render-pipelines.universal/Shaders/DepthNormalsPass.hlsl"
             ENDHLSL
         }
     }
