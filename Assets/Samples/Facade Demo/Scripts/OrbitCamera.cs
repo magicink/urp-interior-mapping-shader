@@ -1,6 +1,6 @@
 using UnityEngine;
 
-namespace InteriorMapping
+namespace PyxlMedia.InteriorMapping.Samples
 {
     /// <summary>
     /// Slowly orbits the camera around the building at a fixed elevation, always aimed at it.

@@ -1,0 +1,23 @@
+{
+  "name": "com.pyxlmedia.interior-mapping",
+  "version": "0.1.0",
+  "displayName": "Interior Mapping (URP)",
+  "description": "A single-file URP shader that fakes building interiors behind flat facades with a cubemap, plus an editor tool that bakes the interior cubemap.",
+  "unity": "6000.5",
+  "dependencies": {
+    "com.unity.render-pipelines.universal": "17.5.0"
+  },
+  "keywords": [
+    "interior mapping",
+    "shader",
+    "urp",
+    "facade"
+  ],
+  "samples": [
+    {
+      "displayName": "Facade Demo",
+      "description": "A facade using the shader, with an orbiting camera and a day/night cycle.",
+      "path": "Samples~/Facade Demo"
+    }
+  ]
+}

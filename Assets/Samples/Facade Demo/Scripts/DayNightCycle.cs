@@ -2,7 +2,7 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Serialization;
 
-namespace InteriorMapping
+namespace PyxlMedia.InteriorMapping.Samples
 {
     /// <summary>
     /// Drives the scene's sun, ambient light and environment reflection through a day/night cycle.

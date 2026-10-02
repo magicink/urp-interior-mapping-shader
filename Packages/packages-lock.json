@@ -1,5 +1,13 @@
 {
   "dependencies": {
+    "com.pyxlmedia.interior-mapping": {
+      "version": "file:com.pyxlmedia.interior-mapping",
+      "depth": 0,
+      "source": "embedded",
+      "dependencies": {
+        "com.unity.render-pipelines.universal": "17.5.0"
+      }
+    },
     "com.unity.ai.navigation": {
       "version": "2.0.14",
       "depth": 0,

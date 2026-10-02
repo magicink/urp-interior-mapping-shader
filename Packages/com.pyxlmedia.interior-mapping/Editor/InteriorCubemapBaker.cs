@@ -5,7 +5,7 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 
-namespace InteriorMapping.EditorTools
+namespace PyxlMedia.InteriorMapping.EditorTools
 {
     /// <summary>
     /// Bakes the cubemap sampled by the <c>InteriorMapping/SingleFile</c> shader.
@@ -16,9 +16,10 @@ namespace InteriorMapping.EditorTools
     /// </remarks>
     public static class InteriorCubemapBaker
     {
-        private const string CubemapAssetPath = "Assets/Textures/InteriorRoom.cubemap";
-        private const string MaterialAssetPath = "Assets/Materials/InteriorMapping.mat";
+        private const string ShaderName = "InteriorMapping/SingleFile";
         private const string CubemapPropertyName = "_InteriorCubemap";
+        private const string CubemapExtension = "cubemap";
+        private const string DefaultCubemapName = "InteriorRoom";
         private const string LitShaderName = "Universal Render Pipeline/Lit";
 
         // The interior is only seen through a window-sized slice of the box, never full screen.
@@ -31,9 +32,20 @@ namespace InteriorMapping.EditorTools
         // The room is sealed, but building it far out also guards against large scene objects.
         private static readonly Vector3 BakeOrigin = new Vector3(0f, -5000f, 0f);
 
+        /// <summary>
+        /// Bakes into the selected material's cubemap, asking where to save one if it has none.
+        /// </summary>
         [MenuItem("Tools/Interior Mapping/Bake Interior Cubemap")]
         public static void Bake()
         {
+            Material targetMaterial = GetSelectedTargetMaterial();
+            string cubemapAssetPath = ChooseCubemapPath(targetMaterial);
+
+            if (string.IsNullOrEmpty(cubemapAssetPath))
+            {
+                return; // Save dialog cancelled.
+            }
+
             GameObject room = null;
             Camera probeCamera = null;
             RenderTexture cubemapRenderTarget = null;
@@ -65,10 +77,14 @@ namespace InteriorMapping.EditorTools
                     return;
                 }
 
-                Cubemap bakedAsset = SaveOrReplaceAsset(ReadBack(cubemapRenderTarget));
-                AssignToMaterial(bakedAsset);
+                Cubemap bakedAsset = SaveOrReplaceAsset(ReadBack(cubemapRenderTarget), cubemapAssetPath);
 
-                Debug.Log($"Baked interior cubemap to {CubemapAssetPath} ({FaceSize}px faces).", bakedAsset);
+                if (targetMaterial != null)
+                {
+                    AssignToMaterial(targetMaterial, bakedAsset);
+                }
+
+                Debug.Log($"Baked interior cubemap to {cubemapAssetPath} ({FaceSize}px faces).", bakedAsset);
                 EditorGUIUtility.PingObject(bakedAsset);
             }
             finally
@@ -88,6 +104,57 @@ namespace InteriorMapping.EditorTools
 
                 DestroyRoom(room);
             }
+        }
+
+        private static Material GetSelectedTargetMaterial()
+        {
+            if (!(Selection.activeObject is Material material))
+            {
+                return null;
+            }
+
+            if (!material.HasProperty(CubemapPropertyName))
+            {
+                Debug.LogWarning($"'{material.name}' has no {CubemapPropertyName} property, so the bake will not " +
+                                 $"be assigned to it. Is the {ShaderName} shader assigned to it?", material);
+                return null;
+            }
+
+            // Installed packages are read-only, so their materials cannot take the result.
+            if (!IsInAssets(AssetDatabase.GetAssetPath(material)))
+            {
+                Debug.LogWarning($"'{material.name}' is not under Assets, so the bake will not be assigned to it. " +
+                                 "Duplicate it into Assets first.", material);
+                return null;
+            }
+
+            return material;
+        }
+
+        private static string ChooseCubemapPath(Material targetMaterial)
+        {
+            // Re-baking over the material's own cubemap keeps every reference to it intact.
+            if (targetMaterial != null && targetMaterial.GetTexture(CubemapPropertyName) is Cubemap currentCubemap)
+            {
+                string currentPath = AssetDatabase.GetAssetPath(currentCubemap);
+
+                if (IsInAssets(currentPath) && currentPath.EndsWith("." + CubemapExtension))
+                {
+                    return currentPath;
+                }
+            }
+
+            string defaultFolder = targetMaterial != null
+                ? Path.GetDirectoryName(AssetDatabase.GetAssetPath(targetMaterial))?.Replace('\\', '/')
+                : "Assets";
+
+            return EditorUtility.SaveFilePanelInProject("Save Interior Cubemap", DefaultCubemapName,
+                CubemapExtension, "Choose where to save the baked interior cubemap.", defaultFolder);
+        }
+
+        private static bool IsInAssets(string assetPath)
+        {
+            return assetPath.StartsWith("Assets/");
         }
 
         private static GameObject BuildRoom()
@@ -243,17 +310,9 @@ namespace InteriorMapping.EditorTools
             return cubemap;
         }
 
-        private static Cubemap SaveOrReplaceAsset(Cubemap bakedCubemap)
+        private static Cubemap SaveOrReplaceAsset(Cubemap bakedCubemap, string cubemapAssetPath)
         {
-            string directory = Path.GetDirectoryName(CubemapAssetPath);
-
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-                AssetDatabase.Refresh();
-            }
-
-            Cubemap existingAsset = AssetDatabase.LoadAssetAtPath<Cubemap>(CubemapAssetPath);
+            Cubemap existingAsset = AssetDatabase.LoadAssetAtPath<Cubemap>(cubemapAssetPath);
             bool canOverwriteInPlace = existingAsset != null && existingAsset.width == FaceSize &&
                                        existingAsset.format == bakedCubemap.format;
 
@@ -272,28 +331,13 @@ namespace InteriorMapping.EditorTools
                 return existingAsset;
             }
 
-            AssetDatabase.CreateAsset(bakedCubemap, CubemapAssetPath);
+            AssetDatabase.CreateAsset(bakedCubemap, cubemapAssetPath);
             AssetDatabase.SaveAssets();
             return bakedCubemap;
         }
 
-        private static void AssignToMaterial(Cubemap cubemap)
+        private static void AssignToMaterial(Material material, Cubemap cubemap)
         {
-            Material material = AssetDatabase.LoadAssetAtPath<Material>(MaterialAssetPath);
-
-            if (material == null)
-            {
-                Debug.LogWarning($"No material at {MaterialAssetPath}; the cubemap was baked but not assigned.");
-                return;
-            }
-
-            if (!material.HasProperty(CubemapPropertyName))
-            {
-                Debug.LogWarning($"'{material.name}' has no {CubemapPropertyName} property. " +
-                                 "Is the InteriorMapping/SingleFile shader assigned to it?");
-                return;
-            }
-
             material.SetTexture(CubemapPropertyName, cubemap);
             EditorUtility.SetDirty(material);
             AssetDatabase.SaveAssets();

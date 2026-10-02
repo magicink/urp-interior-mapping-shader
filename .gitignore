@@ -168,6 +168,8 @@ $RECYCLE.BIN/
 
 # Linux
 *~
+# Unity package samples are hidden from the editor with a trailing tilde, but must be committed.
+!Samples~/
 .fuse_hidden*
 .directory
 .Trash-*
