@@ -14,7 +14,7 @@ namespace PyxlMedia.InteriorMapping.Development
     public static class FacadeDemoSampleSync
     {
         private const string SourceFolder = "Assets/Samples/Facade Demo";
-        private const string PackageSampleFolder = "Packages/com.pyxlmedia.interior-mapping/Samples~/Facade Demo";
+        private const string PackageSampleFolder = "Packages/com.pyxlmedia.interior-mapping.urp/Samples~/Facade Demo";
 
         [MenuItem("Tools/Interior Mapping/Sync Facade Demo Into Package")]
         public static void Sync()

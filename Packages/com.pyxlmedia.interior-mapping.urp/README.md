@@ -9,13 +9,13 @@ Requires Unity 6000.5 and URP 17.5.
 In Package Manager, choose **+ → Install package from git URL…** and enter:
 
 ```
-https://github.com/magicink/urp-interior-mapping-shader.git?path=/Packages/com.pyxlmedia.interior-mapping
+https://github.com/magicink/urp-interior-mapping-shader.git?path=/Packages/com.pyxlmedia.interior-mapping.urp
 ```
 
 You can also add it to `Packages/manifest.json` directly. Append `#<tag>` to pin a release:
 
 ```json
-"com.pyxlmedia.interior-mapping": "https://github.com/magicink/urp-interior-mapping-shader.git?path=/Packages/com.pyxlmedia.interior-mapping#v0.1.0"
+"com.pyxlmedia.interior-mapping.urp": "https://github.com/magicink/urp-interior-mapping-shader.git?path=/Packages/com.pyxlmedia.interior-mapping.urp#v0.1.0"
 ```
 
 ## Use

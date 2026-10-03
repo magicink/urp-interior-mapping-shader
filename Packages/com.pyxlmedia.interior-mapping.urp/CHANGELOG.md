@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Renamed the package to `com.pyxlmedia.interior-mapping.urp` so its name states the render pipeline. If you installed it from git, update the key and `?path=` in `Packages/manifest.json` to the new name.
 - The facade casts shadows and receives main-light shadows. Shadows dim only the sunlit brick and the sun glint, so lit interiors and sky reflections are unaffected.
 - The facade receives SSAO.
 - Added `DepthOnly` and `DepthNormals` passes, so the building now shows up in the camera depth texture and in SSAO.

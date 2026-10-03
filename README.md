@@ -1,10 +1,10 @@
 # URP Interior Mapping
 
-This is the development project for the `com.pyxlmedia.interior-mapping` package. For installation and usage, see the [package README](Packages/com.pyxlmedia.interior-mapping/README.md).
+This is the development project for the `com.pyxlmedia.interior-mapping.urp` package. For installation and usage, see the [package README](Packages/com.pyxlmedia.interior-mapping.urp/README.md).
 
 ## Layout
 
-- `Packages/com.pyxlmedia.interior-mapping/` is the package, embedded here so you can edit it in place.
+- `Packages/com.pyxlmedia.interior-mapping.urp/` is the package, embedded here so you can edit it in place.
 - `Assets/Samples/Facade Demo/` is the editable copy of the package's Facade Demo sample.
 - `Assets/Settings/` holds this project's URP assets. They are not part of the package.
 

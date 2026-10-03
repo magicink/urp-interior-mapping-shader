@@ -1,7 +1,7 @@
 {
   "dependencies": {
-    "com.pyxlmedia.interior-mapping": {
-      "version": "file:com.pyxlmedia.interior-mapping",
+    "com.pyxlmedia.interior-mapping.urp": {
+      "version": "file:com.pyxlmedia.interior-mapping.urp",
       "depth": 0,
       "source": "embedded",
       "dependencies": {
