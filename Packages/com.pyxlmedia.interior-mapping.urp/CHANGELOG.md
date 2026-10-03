@@ -10,6 +10,9 @@
 - The facade casts shadows and receives main-light shadows. Shadows dim only the sunlit brick and the sun glint, so lit interiors and sky reflections are unaffected.
 - The facade receives SSAO.
 - Added `DepthOnly` and `DepthNormals` passes, so the building now shows up in the camera depth texture and in SSAO.
+- `Room Size Meters` replaces `Windows Per Face`, so the window grid follows each building's size and one material fits buildings of any size. Existing materials lose their window counts: set the room size to the building's size divided by the old counts.
+- Arched window heads stay round and glazing bars keep an even width when rooms aren't square.
+- Buildings that share a material no longer light the same rooms. Lamps, blinds, room mirroring and brick shading are seeded from each building's position, so moving a building reshuffles them.
 - Facade Demo: the sun's arc can lean away from overhead (`Arc Tilt` on `DayNightCycle`, default -10°), so shadows swing across the facade during the morning.
 - Facade Demo: `StructureScatter` rings the building with plain blocks in a new layout each Play, so shadows reach it from every side through the day.
 

@@ -24,7 +24,7 @@ Shader "InteriorMapping/SingleFile"
         [Header(Facade)]
         [MainTexture] _BaseMap("Facade Map", 2D) = "white" {}
         _FacadeColor("Facade Color", Color) = (0.48, 0.27, 0.22, 1)
-        _WindowsPerFace("Windows Per Face (X, Y)", Vector) = (3, 2, 0, 0)
+        _RoomSize("Room Size Meters (W, H)", Vector) = (3, 3, 0, 0)
         _WindowFrameWidth("Window Frame Width", Range(0, 0.49)) = 0.16
         _ArchHeight("Arch Height", Range(0, 1)) = 1
         _FrameColor("Frame Color", Color) = (0.86, 0.85, 0.82, 1)
@@ -79,7 +79,7 @@ Shader "InteriorMapping/SingleFile"
             half4 _WarmLightColor;
             half4 _CoolLightColor;
             float4 _BaseMap_ST;
-            float4 _WindowsPerFace;
+            float4 _RoomSize;
             float4 _MuntinsPerPane;
             float4 _BrickSize;
             float _WindowFrameWidth;
@@ -204,10 +204,15 @@ Shader "InteriorMapping/SingleFile"
 
             half4 frag(Varyings input) : SV_Target
             {
+                // Rooms and brick are both real-world sizes, so measure the box in metres first.
+                float3 objectScale = float3(length(unity_ObjectToWorld._m00_m10_m20),
+                                            length(unity_ObjectToWorld._m01_m11_m21),
+                                            length(unity_ObjectToWorld._m02_m12_m22));
+
                 // One room per window, so a single grid drives both and they cannot drift apart.
-                // Depth reuses the horizontal count; whole numbers only or the last room is clipped.
-                float3 roomsPerAxis = float3(_WindowsPerFace.x, _WindowsPerFace.y, _WindowsPerFace.x);
-                roomsPerAxis = max(1.0, floor(roomsPerAxis));
+                // Depth reuses the room width, rounded to whole rooms or the last one is clipped.
+                float3 roomSize = max(float3(_RoomSize.x, _RoomSize.y, _RoomSize.x), 1e-3);
+                float3 roomsPerAxis = max(1.0, round(objectScale / roomSize));
 
                 // Grid space: the box stretched so every room is a unit cube on the positive side
                 // of the origin, which makes the room a fragment belongs to a plain floor().
@@ -223,9 +228,15 @@ Shader "InteriorMapping/SingleFile"
                 float3 viewRayDirection =
                     normalize((input.positionObjectSpace - cameraPositionObjectSpace) * roomsPerAxis);
 
+                // Every building numbers its rooms from zero, so without an offset from its position,
+                // buildings sharing a material match room for room. Whole offsets keep the lamp hash's
+                // half-room shift clear of every room.
+                float3 buildingOffset = floor(RoomNoise(unity_ObjectToWorld._m03_m13_m23) * 100.0);
+                float3 roomSeed = roomIndex + buildingOffset;
+
                 // Every room shares one cubemap, so mirror it per room or the block reads as
                 // wallpaper. Flipping position and ray together keeps the reflection consistent.
-                float3 roomNoise = RoomNoise(roomIndex);
+                float3 roomNoise = RoomNoise(roomSeed);
                 float2 mirrorSigns = step(0.5, roomNoise.xy) * 2.0 - 1.0;
                 float3 mirrorAxes = float3(mirrorSigns.x, 1.0, mirrorSigns.y);
 
@@ -266,8 +277,9 @@ Shader "InteriorMapping/SingleFile"
                 float archHeight = lerp(_ArchHeight, _GroundFloorArchHeight, isGroundFloor);
 
                 // A circular head in cell space would be an ellipse on the wall, so square the cell
-                // up from the room counts before measuring anything.
-                float archAspect = roomsPerAxis.y / lerp(roomsPerAxis.x, roomsPerAxis.z, isFacingX);
+                // up from its size in metres before measuring anything.
+                float3 roomMeters = objectScale / roomsPerAxis;
+                float archAspect = lerp(roomMeters.x, roomMeters.z, isFacingX) / roomMeters.y;
                 float2 openingHalfExtents = (0.5 - frameWidth) * float2(archAspect, 1.0);
                 float2 wallFromCentre = (cellUv - 0.5) * float2(archAspect, 1.0);
                 float2 glassFromCentre = (glassCellUv - 0.5) * float2(archAspect, 1.0);
@@ -341,7 +353,7 @@ Shader "InteriorMapping/SingleFile"
 
                 // Each room gets its own lamp, hashed half a room off the grid so it is unrelated
                 // to the mirroring and blinds.
-                float3 lampNoise = RoomNoise(roomIndex + 0.5);
+                float3 lampNoise = RoomNoise(roomSeed + 0.5);
                 float isLampOn = 1.0 - step(_LitRoomFraction, lampNoise.x);
                 float lampIntensity = lerp(_LightIntensityMin, _LightIntensityMax, lampNoise.y);
 
@@ -374,9 +386,6 @@ Shader "InteriorMapping/SingleFile"
 
                 // Brick is a real-world size, so course it off object space scaled back up to
                 // metres. Driving it from the mesh unwrap would stretch it with the building.
-                float3 objectScale = float3(length(unity_ObjectToWorld._m00_m10_m20),
-                                            length(unity_ObjectToWorld._m01_m11_m21),
-                                            length(unity_ObjectToWorld._m02_m12_m22));
                 float3 positionMeters = input.positionObjectSpace * objectScale;
                 float2 wallMeters = float2(lerp(positionMeters.x, positionMeters.z, isFacingX),
                                            positionMeters.y);
@@ -397,7 +406,7 @@ Shader "InteriorMapping/SingleFile"
 
                 // A wall of identical bricks reads as wallpaper, the same way a block of identical
                 // rooms does. The roof is not bricked at all, so it keeps the flat tint.
-                float brickNoise = frac(sin(dot(floor(brickCoord),
+                float brickNoise = frac(sin(dot(floor(brickCoord) + buildingOffset.xy,
                                                 float2(19.311, 47.853))) * 43758.5453);
                 float brickShade = lerp(1.0 - _BrickVariation, 1.0 + _BrickVariation, brickNoise);
                 float isWallFace = 1.0 - isUpwardFace;
