@@ -220,7 +220,8 @@ namespace PyxlMedia.InteriorMapping.EditorTools
 
             Light roomLight = lightObject.AddComponent<Light>();
             roomLight.type = LightType.Point;
-            roomLight.color = new Color(1f, 0.93f, 0.82f);
+            // White, so the shader's lamp colours are the only tint the room gets.
+            roomLight.color = Color.white;
             roomLight.intensity = 18f;
             roomLight.range = RoomSize * 1.8f;
             roomLight.shadows = LightShadows.Soft;

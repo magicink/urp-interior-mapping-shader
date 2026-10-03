@@ -6,6 +6,15 @@ Shader "InteriorMapping/SingleFile"
         _InteriorCubemap("Interior Cubemap", Cube) = "" {}
         [MainColor] _BaseColor("Interior Tint", Color) = (1, 1, 1, 1)
 
+        [Header(Room Lights)]
+        _LitRoomFraction("Lit Room Fraction", Range(0, 1)) = 0.6
+        _LightIntensityMin("Light Intensity Min", Range(0, 8)) = 0.5
+        _LightIntensityMax("Light Intensity Max", Range(0, 8)) = 2.5
+        _WarmLightColor("Warm Light Color", Color) = (1, 0.72, 0.45, 1)
+        _CoolLightColor("Cool Light Color", Color) = (0.82, 0.9, 1, 1)
+        _WarmLightBias("Warm Light Bias", Range(0, 1)) = 0.75
+        _DaylightDimming("Daylight Dimming", Range(0, 8)) = 2
+
         [Header(Blinds)]
         _BlindColor("Blind Color", Color) = (0.88, 0.86, 0.8, 1)
         _BlindDepth("Blind Depth", Range(0, 0.5)) = 0.12
@@ -67,6 +76,8 @@ Shader "InteriorMapping/SingleFile"
             half4 _GroundFloorColor;
             half4 _BlindColor;
             half4 _MortarColor;
+            half4 _WarmLightColor;
+            half4 _CoolLightColor;
             float4 _BaseMap_ST;
             float4 _WindowsPerFace;
             float4 _MuntinsPerPane;
@@ -90,6 +101,11 @@ Shader "InteriorMapping/SingleFile"
             float _BlindDepth;
             float _BlindCoverage;
             float _SlatCount;
+            float _LitRoomFraction;
+            float _LightIntensityMin;
+            float _LightIntensityMax;
+            float _WarmLightBias;
+            float _DaylightDimming;
             float _GlassRecessDepth;
             float _GlassReflectivity;
             float _SunGlintStrength;
@@ -165,6 +181,16 @@ Shader "InteriorMapping/SingleFile"
                 return max(half3(0.0, 0.0, 0.0), SampleSH9(coefficients, normalWorld));
             }
 
+            // Three unrelated values in [0, 1) for one room. Room indices are whole numbers, so a
+            // fractional offset gives a fresh set that never lands on another room's.
+            float3 RoomNoise(float3 roomIndex)
+            {
+                return frac(sin(float3(dot(roomIndex, float3(12.9898, 78.233, 37.719)),
+                                       dot(roomIndex, float3(39.346, 11.135, 83.155)),
+                                       dot(roomIndex, float3(73.156, 52.235, 9.1513))))
+                            * 43758.5453);
+            }
+
             Varyings vert(Attributes input)
             {
                 Varyings output;
@@ -199,10 +225,7 @@ Shader "InteriorMapping/SingleFile"
 
                 // Every room shares one cubemap, so mirror it per room or the block reads as
                 // wallpaper. Flipping position and ray together keeps the reflection consistent.
-                float3 roomNoise = frac(sin(float3(dot(roomIndex, float3(12.9898, 78.233, 37.719)),
-                                                   dot(roomIndex, float3(39.346, 11.135, 83.155)),
-                                                   dot(roomIndex, float3(73.156, 52.235, 9.1513))))
-                                        * 43758.5453);
+                float3 roomNoise = RoomNoise(roomIndex);
                 float2 mirrorSigns = step(0.5, roomNoise.xy) * 2.0 - 1.0;
                 float3 mirrorAxes = float3(mirrorSigns.x, 1.0, mirrorSigns.y);
 
@@ -315,8 +338,32 @@ Shader "InteriorMapping/SingleFile"
                 // Slats shade as a sawtooth: each one is shadowed at its lower edge by the one
                 // above. A count of zero flattens the whole blind into a roller shade.
                 float slatShade = lerp(0.72, 1.0, frac(blindCellUv.y * _SlatCount));
-                half3 behindGlass = lerp(interiorColor * _BaseColor.rgb,
-                                         _BlindColor.rgb * slatShade, isBlind);
+
+                // Each room gets its own lamp, hashed half a room off the grid so it is unrelated
+                // to the mirroring and blinds.
+                float3 lampNoise = RoomNoise(roomIndex + 0.5);
+                float isLampOn = 1.0 - step(_LitRoomFraction, lampNoise.x);
+                float lampIntensity = lerp(_LightIntensityMin, _LightIntensityMax, lampNoise.y);
+
+                // Bias bends the hash with a power curve, so short of the ends some rooms always
+                // land on the other colour. At 0.5 the spread is even.
+                float warmthCurve = (1.0 - _WarmLightBias) / max(_WarmLightBias, 1e-3);
+                float warmth = pow(max(lampNoise.z, 1e-4), warmthCurve);
+                half3 lampColor = lerp(_CoolLightColor.rgb, _WarmLightColor.rgb, warmth);
+
+                // Stands in for the eye adjusting to daylight, which URP has no auto exposure for.
+                // A room bright enough to bloom at night would otherwise glow at noon too.
+                half lampExposure = 1.0 / (1.0 + Luminance(_MainLightColor.rgb) * _DaylightDimming);
+
+                // Daylight through the window reaches every room, and is all an unlit one gets.
+                half3 roomLight = SampleAmbientProbe(normalWorld) +
+                                  lampColor * (lampIntensity * isLampOn * lampExposure);
+
+                // A blind is sunlit from outside and lit by the room behind, so a drawn one glows
+                // at night only if its lamp is on.
+                half3 blindLight = roomLight + _MainLightColor.rgb * lambert * sunShadow;
+                half3 behindGlass = lerp(interiorColor * _BaseColor.rgb * roomLight,
+                                         _BlindColor.rgb * slatShade * blindLight, isBlind);
 
                 half3 glassColor = lerp(behindGlass, skyColor, reflectionAmount);
                 glassColor += _MainLightColor.rgb * sunGlint * _SunGlintStrength * lambert * sunShadow;
@@ -407,8 +454,8 @@ Shader "InteriorMapping/SingleFile"
                 AmbientOcclusionFactor screenOcclusion =
                     GetScreenSpaceAmbientOcclusion(GetNormalizedScreenSpaceUV(input.positionClipSpace));
 
-                // The brick needs lighting to read as solid. The interior does not - it was lit
-                // when the cubemap was baked.
+                // The brick needs lighting to read as solid. The interior already got its own from
+                // the room lamps above.
                 half3 ambient = SampleAmbientProbe(facadeNormalWorld) * facadeOcclusion *
                                 screenOcclusion.indirectAmbientOcclusion;
                 half3 sunLight = _MainLightColor.rgb * facadeLambert * sunShadow *
