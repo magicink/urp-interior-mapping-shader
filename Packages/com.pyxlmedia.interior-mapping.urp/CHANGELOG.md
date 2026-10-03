@@ -13,6 +13,9 @@
 - `Room Size Meters` replaces `Windows Per Face`, so the window grid follows each building's size and one material fits buildings of any size. Existing materials lose their window counts: set the room size to the building's size divided by the old counts.
 - Arched window heads stay round and glazing bars keep an even width when rooms aren't square.
 - Buildings that share a material no longer light the same rooms. Lamps, blinds, room mirroring and brick shading are seeded from each building's position, so moving a building reshuffles them.
+- The facade takes scene fog, lit rooms included, so distant buildings fade into it.
+- Window edges, glazing bars, blinds, slats and mortar joints are antialiased. Detail smaller than a pixel fades to its average colour, so distant facades no longer shimmer as the camera moves.
+- The interior picks a cubemap mip from its size on screen, and the baker now writes a mip chain with trilinear filtering. Re-bake existing cubemaps, or distant interiors will still sparkle.
 - Facade Demo: the sun's arc can lean away from overhead (`Arc Tilt` on `DayNightCycle`, default -10°), so shadows swing across the facade during the morning.
 - Facade Demo: `StructureScatter` rings the building with plain blocks in a new layout each Play, so shadows reach it from every side through the day.
 

@@ -284,8 +284,11 @@ namespace PyxlMedia.InteriorMapping.EditorTools
         private static Cubemap ReadBack(RenderTexture cubemapRenderTarget)
         {
             // ReadPixels only speaks 2D, so each face comes back through a scratch texture.
-            // No mips: the shader samples at an explicit LOD 0.
-            Cubemap cubemap = new Cubemap(FaceSize, TextureFormat.RGBA32, mipChain: false);
+            // Mips let distant windows blur instead of sparkle, and trilinear hides the steps between them.
+            Cubemap cubemap = new Cubemap(FaceSize, TextureFormat.RGBA32, mipChain: true)
+            {
+                filterMode = FilterMode.Trilinear
+            };
             Texture2D faceReadbackTexture = new Texture2D(FaceSize, FaceSize, TextureFormat.RGBA32, mipChain: false);
             RenderTexture previousRenderTarget = RenderTexture.active;
 
@@ -300,7 +303,7 @@ namespace PyxlMedia.InteriorMapping.EditorTools
                     cubemap.SetPixels(faceReadbackTexture.GetPixels(), (CubemapFace)faceIndex);
                 }
 
-                cubemap.Apply(updateMipmaps: false);
+                cubemap.Apply(updateMipmaps: true);
             }
             finally
             {
@@ -314,18 +317,15 @@ namespace PyxlMedia.InteriorMapping.EditorTools
         private static Cubemap SaveOrReplaceAsset(Cubemap bakedCubemap, string cubemapAssetPath)
         {
             Cubemap existingAsset = AssetDatabase.LoadAssetAtPath<Cubemap>(cubemapAssetPath);
-            bool canOverwriteInPlace = existingAsset != null && existingAsset.width == FaceSize &&
-                                       existingAsset.format == bakedCubemap.format;
 
             // CreateAsset over an existing path mints a new GUID, breaking the material slot below.
-            if (canOverwriteInPlace)
+            // Copying keeps the GUID even when the size, format or mip count changed.
+            if (existingAsset != null)
             {
-                for (int faceIndex = 0; faceIndex < 6; faceIndex++)
-                {
-                    existingAsset.SetPixels(bakedCubemap.GetPixels((CubemapFace)faceIndex), (CubemapFace)faceIndex);
-                }
-
-                existingAsset.Apply(updateMipmaps: false);
+                // The copy brings the name along too, and it has to keep matching the file.
+                string assetName = existingAsset.name;
+                EditorUtility.CopySerialized(bakedCubemap, existingAsset);
+                existingAsset.name = assetName;
                 EditorUtility.SetDirty(existingAsset);
                 AssetDatabase.SaveAssets();
                 Object.DestroyImmediate(bakedCubemap);

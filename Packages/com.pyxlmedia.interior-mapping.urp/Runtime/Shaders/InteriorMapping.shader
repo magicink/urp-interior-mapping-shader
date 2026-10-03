@@ -79,6 +79,7 @@ Shader "InteriorMapping/SingleFile"
             half4 _WarmLightColor;
             half4 _CoolLightColor;
             float4 _BaseMap_ST;
+            float4 _InteriorCubemap_TexelSize;
             float4 _RoomSize;
             float4 _MuntinsPerPane;
             float4 _BrickSize;
@@ -128,6 +129,7 @@ Shader "InteriorMapping/SingleFile"
             #pragma multi_compile_fragment _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
             #pragma multi_compile_fragment _ _SHADOWS_SOFT _SHADOWS_SOFT_LOW _SHADOWS_SOFT_MEDIUM _SHADOWS_SOFT_HIGH
             #pragma multi_compile_fragment _ _SCREEN_SPACE_OCCLUSION
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Fog.hlsl"
 
             // Core.hlsl declares unity_SpecCube0 but not the decode for it.
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/EntityLighting.hlsl"
@@ -148,6 +150,7 @@ Shader "InteriorMapping/SingleFile"
                 float3 positionObjectSpace : TEXCOORD1;
                 float3 normalObjectSpace : TEXCOORD2;
                 float3 positionWorldSpace : TEXCOORD3;
+                half fogFactor : TEXCOORD4;
             };
 
             TEXTURE2D(_BaseMap);
@@ -170,6 +173,45 @@ Shader "InteriorMapping/SingleFile"
                 float headDistance =
                     length(float2(fromCentre.x, max(fromCentre.y - springHeight, 0.0))) - headRadius;
                 return max(boxDistance, headDistance);
+            }
+
+            // Share of a pixel on the inside of an edge, from the signed distance to it.
+            float CoverageInside(float distanceToEdge, float pixelSize)
+            {
+                return saturate(0.5 - distanceToEdge / max(pixelSize, 1e-6));
+            }
+
+            // A bar thinner than a pixel is drawn a pixel wide and dimmed to match, so it fades
+            // with distance instead of breaking up.
+            float BarCoverage(float distanceFromCentre, float halfWidth, float pixelSize)
+            {
+                float drawnHalfWidth = max(halfWidth, pixelSize * 0.5);
+                return CoverageInside(distanceFromCentre - drawnHalfWidth, pixelSize) *
+                       halfWidth / max(drawnHalfWidth, 1e-6);
+            }
+
+            // Box filters joints centred on whole numbers by differencing their running integral,
+            // so courses finer than a pixel settle to their average instead of shimmering.
+            float2 FilteredJointCoverage(float2 coordinate, float2 jointWidth, float2 pixelSize)
+            {
+                // Measured from this brick so floor() stays small and the difference stays precise.
+                float2 halfPixel = max(pixelSize, 1e-5) * 0.5;
+                float2 position = frac(coordinate + jointWidth * 0.5);
+                float2 above = position + halfPixel;
+                float2 below = position - halfPixel;
+                float2 jointsAbove = floor(above) * jointWidth + min(frac(above), jointWidth);
+                float2 jointsBelow = floor(below) * jointWidth + min(frac(below), jointWidth);
+                return (jointsAbove - jointsBelow) / (halfPixel * 2.0);
+            }
+
+            // frac() box filtered the same way. Its running integral is (floor(t) + frac(t)^2) / 2.
+            float FilteredSawtooth(float coordinate, float pixelSize)
+            {
+                float halfPixel = max(pixelSize, 1e-5) * 0.5;
+                float above = frac(coordinate) + halfPixel;
+                float below = frac(coordinate) - halfPixel;
+                return (floor(above) - floor(below) + frac(above) * frac(above) - frac(below) * frac(below)) /
+                       (halfPixel * 4.0);
             }
 
             // URP keeps the ambient probe in SH coefficients. Core.hlsl declares them, but the
@@ -199,6 +241,9 @@ Shader "InteriorMapping/SingleFile"
                 output.uv = input.uv;
                 output.positionObjectSpace = input.positionObjectSpace.xyz;
                 output.normalObjectSpace = input.normalObjectSpace;
+
+                // URP 17 fogs per pixel and ignores this, but an older or newer one may not.
+                output.fogFactor = ComputeFogFactor(output.positionClipSpace.z);
                 return output;
             }
 
@@ -254,16 +299,18 @@ Shader "InteriorMapping/SingleFile"
                 float3 wallHitPosition = positionInRoom + viewRayDirection * nearestWallDistance;
 
                 // The hit position doubles as a direction from the room centre, which is what a
-                // cubemap lookup wants. Explicit LOD 0 stops mip selection reading the direction
-                // jump at each corner as fine detail and blurring the seam.
+                // cubemap lookup wants. Each face spans one room unit, so the mip comes straight from
+                // how far the hit moves per pixel. Unlike hardware selection, that does not spike at corners.
+                float hitPixelSize = max(length(ddx(wallHitPosition)), length(ddy(wallHitPosition)));
+                float interiorLod = log2(max(hitPixelSize * _InteriorCubemap_TexelSize.z, 1e-6));
                 half3 interiorColor = SAMPLE_TEXTURECUBE_LOD(
-                    _InteriorCubemap, sampler_InteriorCubemap, wallHitPosition, 0).rgb;
+                    _InteriorCubemap, sampler_InteriorCubemap, wallHitPosition, interiorLod).rgb;
 
                 // Window cells come off the same grid as the rooms, so each window lands dead
                 // centre in its own room whatever the mesh UVs happen to do.
                 float isFacingX = step(0.5, abs(input.normalObjectSpace.x));
-                float2 cellUv = frac(float2(lerp(positionInGrid.x, positionInGrid.z, isFacingX),
-                                            positionInGrid.y));
+                float2 faceGrid = float2(lerp(positionInGrid.x, positionInGrid.z, isFacingX), positionInGrid.y);
+                float2 cellUv = frac(faceGrid);
 
                 // The same swap as cellUv, leaving the ray as across-the-face, up, into-the-wall.
                 float3 rayInFaceSpace = lerp(facadeRayDirection.xyz, facadeRayDirection.zyx, isFacingX);
@@ -280,19 +327,30 @@ Shader "InteriorMapping/SingleFile"
                 // up from its size in metres before measuring anything.
                 float3 roomMeters = objectScale / roomsPerAxis;
                 float archAspect = lerp(roomMeters.x, roomMeters.z, isFacingX) / roomMeters.y;
-                float2 openingHalfExtents = (0.5 - frameWidth) * float2(archAspect, 1.0);
-                float2 wallFromCentre = (cellUv - 0.5) * float2(archAspect, 1.0);
-                float2 glassFromCentre = (glassCellUv - 0.5) * float2(archAspect, 1.0);
+                float2 cellAspect = float2(archAspect, 1.0);
+                float2 openingHalfExtents = (0.5 - frameWidth) * cellAspect;
+                float2 wallFromCentre = (cellUv - 0.5) * cellAspect;
+                float2 glassFromCentre = (glassCellUv - 0.5) * cellAspect;
+
+                // Pixel size in those same units, for antialiasing. Taken before frac(), which jumps
+                // at every cell edge.
+                float2 wallPixel = fwidth(faceGrid) * cellAspect;
+                float2 glassPixel = fwidth(faceGrid + parallaxPerDepth * _GlassRecessDepth) * cellAspect;
 
                 // Glass sits behind the wall, so the ray has to clear the opening at both ends or
                 // it struck the frame. No frac() on the far end - the overshoot is the occlusion.
                 float intoFrame = DistancePastOpening(wallFromCentre, openingHalfExtents, archHeight);
                 float intoFrameAtGlass =
                     DistancePastOpening(glassFromCentre, openingHalfExtents, archHeight);
-                float isPane = step(max(intoFrame, intoFrameAtGlass), 0.0);
+
+                // Capped at the pixel's own size, since the glass distance jumps where cells meet.
+                float paneDistance = max(intoFrame, intoFrameAtGlass);
+                float2 panePixelCap = max(wallPixel, glassPixel);
+                float panePixel = min(fwidth(paneDistance), panePixelCap.x + panePixelCap.y);
+                float isPane = CoverageInside(paneDistance, panePixel);
 
                 // Bars sit on the glass, so they parallax with the interior instead of sliding
-                // across it. Everything here is a distance, so thin beats thick at every crossing.
+                // across it. Each runs along one axis, so it filters with the pixel's size across it.
                 float2 fromOpeningCorner = glassFromCentre + openingHalfExtents;
                 float2 muntinSpacing = (openingHalfExtents * 2.0) / max(_MuntinsPerPane.xy, 1.0);
                 float2 toMuntin = abs(fromOpeningCorner -
@@ -302,13 +360,14 @@ Shader "InteriorMapping/SingleFile"
                 float toCheckRail = abs(glassFromCentre.y -
                                         (_CheckRailHeight * 2.0 - 1.0) * openingHalfExtents.y);
 
+                float sashBars = max(max(BarCoverage(toMuntin.x, _MuntinWidth, glassPixel.x),
+                                         BarCoverage(toMuntin.y, _MuntinWidth, glassPixel.y)),
+                                     BarCoverage(toCheckRail, _CheckRailWidth, glassPixel.y));
+
                 // A shopfront is plate glass between posts, so the sash bars drop out down there
-                // and only the mullion survives. The 1.0 is a distance no min() will ever pick.
-                float sashBarDistance = min(min(toMuntin.x, toMuntin.y) - _MuntinWidth,
-                                            toCheckRail - _CheckRailWidth);
-                float barDistance = min(lerp(sashBarDistance, 1.0, isGroundFloor),
-                                        abs(glassFromCentre.x) - _MullionWidth);
-                float isBar = isPane * step(barDistance, 0.0);
+                // and only the mullion survives.
+                float isBar = max(sashBars * (1.0 - isGroundFloor),
+                                  BarCoverage(abs(glassFromCentre.x), _MullionWidth, glassPixel.x));
 
                 // Roof and underside stay solid, or the building reads as a greenhouse.
                 float isUpwardFace = step(0.5, abs(input.normalObjectSpace.y));
@@ -345,11 +404,13 @@ Shader "InteriorMapping/SingleFile"
                 // Coverage shifts the hash rather than scaling it, so the ends of the slider clamp
                 // rooms to fully open or fully shut instead of settling everything on an average.
                 float blindDrop = saturate(roomNoise.z + _BlindCoverage * 2.0 - 1.0);
-                float isBlind = step(1.0 - blindDrop, blindCellUv.y);
+                float blindPixel = fwidth(blindCellUv.y);
+                float isBlind = CoverageInside(1.0 - blindDrop - blindCellUv.y, blindPixel);
 
                 // Slats shade as a sawtooth: each one is shadowed at its lower edge by the one
-                // above. A count of zero flattens the whole blind into a roller shade.
-                float slatShade = lerp(0.72, 1.0, frac(blindCellUv.y * _SlatCount));
+                // above. A count of zero flattens the whole blind into a roller shade at the dark end.
+                float slatSawtooth = FilteredSawtooth(blindCellUv.y * _SlatCount, blindPixel * _SlatCount);
+                float slatShade = lerp(0.72, 1.0, slatSawtooth * saturate(_SlatCount));
 
                 // Each room gets its own lamp, hashed half a room off the grid so it is unrelated
                 // to the mirroring and blinds.
@@ -402,20 +463,38 @@ Shader "InteriorMapping/SingleFile"
                 float2 toBrickEdge = (0.5 - abs(insideBrick - 0.5)) * brickSize;
                 float mortarHalfWidth = max(_MortarWidth * 0.5, 1e-4);
                 float intoMortar = min(toBrickEdge.x, toBrickEdge.y) - mortarHalfWidth;
-                float isMortar = step(intoMortar, 0.0);
+
+                // Pixel size in metres, taken before the bond offset or every course edge reads as a jump.
+                float2 wallPixelMeters = fwidth(wallMeters);
+                float2 jointCoverage = FilteredJointCoverage(brickCoord, mortarHalfWidth * 2.0 / brickSize,
+                                                             wallPixelMeters / brickSize);
+                float mortarCoverage = 1.0 - (1.0 - jointCoverage.x) * (1.0 - jointCoverage.y);
+
+                // Detail a pixel or so across only sparkles, so it fades in between one and three pixels.
+                float pixelMeters = max(max(wallPixelMeters.x, wallPixelMeters.y), 1e-6);
+                float brickResolved = saturate(min(brickSize.x, brickSize.y) / pixelMeters * 0.5 - 0.5);
+                float jointResolved = saturate(mortarHalfWidth / pixelMeters - 0.5);
 
                 // A wall of identical bricks reads as wallpaper, the same way a block of identical
                 // rooms does. The roof is not bricked at all, so it keeps the flat tint.
                 float brickNoise = frac(sin(dot(floor(brickCoord) + buildingOffset.xy,
                                                 float2(19.311, 47.853))) * 43758.5453);
-                float brickShade = lerp(1.0 - _BrickVariation, 1.0 + _BrickVariation, brickNoise);
+                float brickVariation = _BrickVariation * brickResolved;
+                float brickShade = lerp(1.0 - brickVariation, 1.0 + brickVariation, brickNoise);
                 float isWallFace = 1.0 - isUpwardFace;
-                half3 brickWall = lerp(facadeTint * brickShade, _MortarColor.rgb, isMortar);
+                half3 brickWall = lerp(facadeTint * brickShade, _MortarColor.rgb, mortarCoverage);
                 half3 wallColor = facadeMap * lerp(facadeTint, brickWall, isWallFace);
+
+                // Brick between two frames is a band centred on the cell edge, so it filters as a bar.
+                // Filtering the frame edge alone leaves a seam wherever neighbouring frames meet.
+                float2 toCellEdgeAxes = (0.5 - abs(cellUv - 0.5)) * cellAspect;
+                float toCellEdge = min(toCellEdgeAxes.x, toCellEdgeAxes.y);
+                float cellEdgePixel = toCellEdgeAxes.x < toCellEdgeAxes.y ? wallPixel.x : wallPixel.y;
+                float brickHalfWidth = max(intoFrame - _FrameThickness + toCellEdge, 0.0);
 
                 // intoFrame is negative inside the opening, so jamb and bar pixels land here too and
                 // take frame colour at full strength, which is what both of them want.
-                float isFrame = step(intoFrame, _FrameThickness) * (1.0 - isUpwardFace);
+                float isFrame = (1.0 - BarCoverage(toCellEdge, brickHalfWidth, cellEdgePixel)) * isWallFace;
 
                 // A reveal shades by which way it faces: dark under the lintel, bright on the sill,
                 // neutral on the jambs. Ramped rather than flipped, or the jambs break at midheight.
@@ -430,7 +509,8 @@ Shader "InteriorMapping/SingleFile"
                 float isExposedBrick = isWallFace * (1.0 - isFrame);
 
                 // The joint is a channel: steepest where it meets the brick, flat at the bottom.
-                float jointSlope = isMortar * isExposedBrick *
+                // Too narrow to resolve, it lies flat and the occlusion below carries it.
+                float jointSlope = mortarCoverage * isExposedBrick * jointResolved *
                                    saturate(1.0 + intoMortar / mortarHalfWidth);
                 float2 nearestJointAxis = step(toBrickEdge.xy, toBrickEdge.yx);
                 float2 jointTilt = sign(insideBrick - 0.5) * nearestJointAxis *
@@ -450,9 +530,11 @@ Shader "InteriorMapping/SingleFile"
                 half facadeLambert = saturate(dot(facadeNormalWorld, _MainLightPosition.xyz));
 
                 // Occlusion rides the ambient, not the sun. That is the whole point - relief lit
-                // only by lambert vanishes the moment a face turns away from the light.
-                float mortarOcclusion = _MortarOcclusion * isExposedBrick *
-                                        saturate(-intoMortar / mortarHalfWidth);
+                // only by lambert vanishes the moment a face turns away from the light. Across its
+                // width a joint averages half its peak, which is all a distant one should show.
+                float jointOcclusion = lerp(0.5 * mortarCoverage, saturate(-intoMortar / mortarHalfWidth),
+                                            jointResolved);
+                float mortarOcclusion = _MortarOcclusion * isExposedBrick * jointOcclusion;
                 float revealOcclusion = _RevealOcclusion * revealShade * isWallFace;
 
                 // Two independent occluders multiply rather than add, so a joint inside a reveal
@@ -471,7 +553,11 @@ Shader "InteriorMapping/SingleFile"
                                  screenOcclusion.directAmbientOcclusion;
                 half3 litFacade = facadeColor * (sunLight + ambient);
 
-                return half4(lerp(litFacade, glassColor, isWindow), 1);
+                half3 surfaceColor = lerp(litFacade, glassColor, isWindow);
+
+                // The lit rooms are fogged too, or distant windows would glow straight through it.
+                half fogFactor = InitializeInputDataFog(float4(input.positionWorldSpace, 1.0), input.fogFactor);
+                return half4(MixFog(surfaceColor, fogFactor), 1);
             }
             ENDHLSL
         }
